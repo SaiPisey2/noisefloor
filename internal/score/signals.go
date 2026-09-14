@@ -59,9 +59,10 @@ type Signals struct {
 	UniqueFingerprints int
 	P50Duration        time.Duration
 
-	// P90Duration is reserved for issue #9 (counterfactual computation:
-	// estimating how a proposed threshold or for: change would have affected
-	// past episodes). Computed and stored today; not yet read.
+	// P90Duration feeds internal/remediate.SelectCandidateFor, which adds
+	// the rule's current for: back onto it to propose a candidate for:
+	// value (issue #9): see that function's doc comment for why P90 and
+	// why the current for: has to be added back on.
 	P90Duration time.Duration
 
 	// FirstEpisode is when this rule's earliest firing episode in the window
