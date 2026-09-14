@@ -43,11 +43,39 @@ func TestMatcherMatches(t *testing.T) {
 }
 
 func TestMatcherRejectsBadRegex(t *testing.T) {
-	_, err := MatcherMatches(
-		store.Matcher{Name: "a", Value: "[", IsRegex: true, IsEqual: true},
-		map[string]string{"a": "x"})
-	if err == nil {
-		t.Fatal("bad regex accepted, want error")
+	labels := map[string]string{"a": "x"}
+	bad := store.Matcher{Name: "a", Value: "[", IsRegex: true, IsEqual: true}
+
+	// Twice, because the failure is cached: a cached error must still be an
+	// error, and must never degrade into a match on the second call.
+	for i := 0; i < 2; i++ {
+		matched, err := MatcherMatches(bad, labels)
+		if err == nil {
+			t.Fatalf("call %d: bad regex accepted, want error", i+1)
+		}
+		if matched {
+			t.Errorf("call %d: bad regex reported a match; matching must fail closed", i+1)
+		}
+	}
+}
+
+// TestMatcherRegexIsCachedPerPattern pins the compile cache. SilencedSeconds
+// evaluates every matcher of every silence for every episode, so compiling per
+// call is millions of identical compilations on a plausible install.
+func TestMatcherRegexIsCachedPerPattern(t *testing.T) {
+	const pattern = "cached-.*"
+	matcherRegexes.Delete(pattern)
+
+	first, err := matcherRegex(pattern)
+	if err != nil {
+		t.Fatalf("matcherRegex: %v", err)
+	}
+	second, err := matcherRegex(pattern)
+	if err != nil {
+		t.Fatalf("matcherRegex: %v", err)
+	}
+	if first != second {
+		t.Error("matcherRegex recompiled an already-compiled pattern")
 	}
 }
 

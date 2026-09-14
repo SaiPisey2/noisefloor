@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/store"
@@ -62,6 +63,34 @@ func FetchSilences(ctx context.Context, amURL string, hc *http.Client) ([]store.
 	return out, nil
 }
 
+// matcherRegexes caches compiled matcher patterns. SilencedSeconds runs once
+// per episode and evaluates every matcher of every silence, so a compile per
+// call is a compile per (episode x silence x matcher): on a plausible install
+// -- tens of thousands of episodes against a few hundred silences -- that is
+// millions of identical compilations inside the scan's timeout budget.
+//
+// Keyed by the raw pattern, and the compile failure is cached too, so an
+// invalid pattern is not re-attempted for every episode either.
+var matcherRegexes sync.Map // string -> compiledMatcher
+
+type compiledMatcher struct {
+	re  *regexp.Regexp
+	err error
+}
+
+func matcherRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := matcherRegexes.Load(pattern); ok {
+		c := v.(compiledMatcher)
+		return c.re, c.err
+	}
+	re, err := regexp.Compile("^(?:" + pattern + ")$")
+	if err != nil {
+		err = fmt.Errorf("invalid matcher regex %q: %w", pattern, err)
+	}
+	matcherRegexes.Store(pattern, compiledMatcher{re: re, err: err})
+	return re, err
+}
+
 // MatcherMatches applies Alertmanager matcher semantics. A missing label is
 // the empty string, and regexes are fully anchored.
 func MatcherMatches(m store.Matcher, labels map[string]string) (bool, error) {
@@ -74,9 +103,11 @@ func MatcherMatches(m store.Matcher, labels map[string]string) (bool, error) {
 		return value != m.Value, nil
 	}
 
-	re, err := regexp.Compile("^(?:" + m.Value + ")$")
+	re, err := matcherRegex(m.Value)
 	if err != nil {
-		return false, fmt.Errorf("invalid matcher regex %q: %w", m.Value, err)
+		// Fail closed: an unparseable matcher cannot be shown to cover
+		// anything, and must never be read as a match.
+		return false, err
 	}
 	matched := re.MatchString(value)
 	if m.IsEqual {
