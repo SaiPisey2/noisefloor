@@ -9,15 +9,19 @@ import (
 )
 
 func TestReconcile(t *testing.T) {
+	// DemoSpiky carries a matching expr on both sides: this test is about
+	// key-set matching (missing in files / missing in prometheus), not
+	// drift, and an empty expr on both sides would itself fail to parse as
+	// PromQL and register as a spurious Drifted finding.
 	locs := []RuleLocation{
-		{Key: RuleKey{Group: "demo", AlertName: "DemoSpiky"}, File: "demo.yml"},
-		{Key: RuleKey{Group: "demo", AlertName: "OrphanFileRule"}, File: "demo.yml"},
+		{Key: RuleKey{Group: "demo", AlertName: "DemoSpiky"}, File: "demo.yml", ExprValue: "up == 0"},
+		{Key: RuleKey{Group: "demo", AlertName: "OrphanFileRule"}, File: "demo.yml", ExprValue: "up == 0"},
 	}
 	groups := []prom.RuleGroup{
 		{
 			Name: "demo",
 			Alerting: []prom.AlertingRule{
-				{Name: "DemoSpiky"},
+				{Name: "DemoSpiky", Query: "up == 0"},
 				{Name: "OrphanPromRule"},
 			},
 		},
@@ -48,10 +52,10 @@ func TestReconcile(t *testing.T) {
 
 func TestReconcile_noDiscrepancies(t *testing.T) {
 	locs := []RuleLocation{
-		{Key: RuleKey{Group: "demo", AlertName: "DemoSpiky"}, File: "demo.yml"},
+		{Key: RuleKey{Group: "demo", AlertName: "DemoSpiky"}, File: "demo.yml", ExprValue: "up == 0"},
 	}
 	groups := []prom.RuleGroup{
-		{Name: "demo", Alerting: []prom.AlertingRule{{Name: "DemoSpiky"}}},
+		{Name: "demo", Alerting: []prom.AlertingRule{{Name: "DemoSpiky", Query: "up == 0"}}},
 	}
 	if findings := Reconcile(locs, groups); len(findings) != 0 {
 		t.Errorf("got %d findings for matching input, want 0: %+v", len(findings), findings)
@@ -141,5 +145,120 @@ func TestDriftAgainstTreatsAbsentForAsZero(t *testing.T) {
 	loc := RuleLocation{ExprValue: "up == 0", ForValue: ""}
 	if detail, drift := DriftAgainst(loc, "up == 0", 0); drift {
 		t.Errorf("reported drift for a rule with no for: on either side: %s", detail)
+	}
+}
+
+// TestCanonicalExprPairsThatMustCompareEqual is the "too strict" half of the
+// drift-check defect: store.Rule.Expr is Prometheus's canonical re-render of
+// the parsed AST, which differs from ordinary hand-written PromQL in
+// exactly these ways. A checker that cannot see past them refuses on nearly
+// every hand-written rule file, which is what collapseWS text comparison
+// did.
+func TestCanonicalExprPairsThatMustCompareEqual(t *testing.T) {
+	cases := []struct {
+		name, file, live, reason string
+	}{
+		{
+			name: "no spaces around the operator",
+			file: "up==0", live: "up == 0",
+			reason: "Prometheus's canonical renderer always spaces binary operators; " +
+				"an author who doesn't is still writing the same rule",
+		},
+		{
+			name: "matcher comma spacing",
+			file: `{job="x", instance="y"}`, live: `{job="x",instance="y"}`,
+			reason: "Prometheus prints matchers comma-joined with no space after the comma; " +
+				"a space there does not change which series are selected",
+		},
+		{
+			name: "number formatting",
+			file: "up == 0.50", live: "up == 0.5",
+			reason: "0.50 and 0.5 are the same float64 -- only comparing the parsed value " +
+				"(not the source text) sees that",
+		},
+		{
+			name: "trailing comment",
+			file: "up == 0 # why this threshold", live: "up == 0",
+			reason: "a PromQL comment is not part of the expression the parser produces, " +
+				"so String() drops it on both sides",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fc, err := canonicalExpr(c.file)
+			if err != nil {
+				t.Fatalf("file side failed to parse: %v", err)
+			}
+			lc, err := canonicalExpr(c.live)
+			if err != nil {
+				t.Fatalf("live side failed to parse: %v", err)
+			}
+			if fc != lc {
+				t.Errorf("canonical forms %q vs %q differ but should be equal: %s", fc, lc, c.reason)
+			}
+		})
+	}
+}
+
+// TestCanonicalExprPairsThatMustCompareDifferent is the "too loose" half:
+// collapsing whitespace collapsed it *inside string literals too*, which
+// makes genuinely different selectors compare equal. Semantic comparison
+// must not repeat that, and must still catch ordinary rule changes.
+func TestCanonicalExprPairsThatMustCompareDifferent(t *testing.T) {
+	cases := []struct {
+		name, file, live, reason string
+	}{
+		{
+			name: "whitespace inside a string literal is real",
+			file: `{job="a b"}`, live: `{job="a  b"}`,
+			reason: "these select different label values -- collapsing whitespace inside a " +
+				"string literal was the exact over-normalisation defect being fixed",
+		},
+		{
+			name: "different range window",
+			file: "rate(x[5m])", live: "rate(x[10m])",
+			reason: "a 5m vs 10m rate window is a materially different rule, not a spelling difference",
+		},
+		{
+			name: "different comparison operator",
+			file: "up > 0.1", live: "up >= 0.1",
+			reason: "> and >= fire on different sets of samples and must never collapse-equal",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fc, err := canonicalExpr(c.file)
+			if err != nil {
+				t.Fatalf("file side failed to parse: %v", err)
+			}
+			lc, err := canonicalExpr(c.live)
+			if err != nil {
+				t.Fatalf("live side failed to parse: %v", err)
+			}
+			if fc == lc {
+				t.Errorf("canonical forms matched (%q) but should differ: %s", fc, c.reason)
+			}
+		})
+	}
+}
+
+// TestDriftAgainstRefusesOnAnUnparseableExpr: falling back to a text
+// comparison when a side fails to parse would silently readopt the defect
+// being fixed here, so a parse failure is itself reported as drift, naming
+// the rule and which side failed.
+func TestDriftAgainstRefusesOnAnUnparseableExpr(t *testing.T) {
+	loc := RuleLocation{
+		Key:       RuleKey{Group: "demo", AlertName: "Broken"},
+		ExprValue: "up ===",
+	}
+	detail, drift := DriftAgainst(loc, "up == 0", 0)
+	if !drift {
+		t.Fatal("an unparseable file expr was treated as agreement")
+	}
+	if !strings.Contains(detail, "demo/Broken") {
+		t.Errorf("detail %q does not name the rule", detail)
+	}
+	if !strings.Contains(detail, "file expr does not parse") {
+		t.Errorf("detail %q does not say which side failed to parse", detail)
 	}
 }

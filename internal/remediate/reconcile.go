@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/promql/parser"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 )
@@ -85,12 +86,24 @@ func (f Finding) String() string {
 // disagrees (naming both values) plus whether there was any disagreement at
 // all.
 //
-// `expr` is compared with whitespace collapsed. Prometheus re-serialises a
-// rule's expression from its parsed form, so a `expr: |` block scalar comes
-// back as one line with the newlines turned into spaces; comparing raw text
-// would report drift on every multi-line expression in the repository. Any
-// difference that survives that normalisation is a real difference in what
-// the rule matches.
+// `expr` is compared semantically, not textually. `store.Rule.Expr` comes
+// back from Prometheus as `rule.Query().String()` -- a canonical re-render
+// of the parsed AST -- while a repository writes PromQL however its authors
+// like: `up==0` with no spaces, `{job="x", instance="y"}` where Prometheus
+// prints matchers comma-joined with none, `0.50` where Prometheus prints
+// `0.5`, or a `#` comment inside an `expr: |` block. None of those survive
+// whitespace-collapsing text comparison, which made the check refuse nearly
+// every hand-written rule. So both sides are parsed with promql/parser and
+// compared by the canonical String() of the parsed expression -- the same
+// renderer Prometheus itself used for liveExpr -- which absorbs all of the
+// above. Critically, it also stops collapsing whitespace *inside* a string
+// literal: {job="a b"} and {job="a  b"} are different selectors, and
+// re-rendering from the parsed matcher value (not raw source text) keeps
+// them different.
+//
+// If either side fails to parse as PromQL, that is reported as drift in its
+// own right, naming which side failed -- falling back to a text comparison
+// would silently readopt the very defect this replaces.
 //
 // `for` is compared as a duration rather than as text, so `60s` and `1m` --
 // the same rule, written two ways -- do not read as drift. An unparseable
@@ -99,7 +112,19 @@ func (f Finding) String() string {
 func DriftAgainst(loc RuleLocation, liveExpr string, liveFor time.Duration) (string, bool) {
 	var parts []string
 
-	if normaliseExpr(loc.ExprValue) != normaliseExpr(liveExpr) {
+	fileCanon, fileErr := canonicalExpr(loc.ExprValue)
+	liveCanon, liveErr := canonicalExpr(liveExpr)
+	switch {
+	case fileErr != nil && liveErr != nil:
+		parts = append(parts, fmt.Sprintf("%s/%s: neither side's expr parses as PromQL "+
+			"(file: %v; prometheus: %v)", loc.Key.Group, loc.Key.AlertName, fileErr, liveErr))
+	case fileErr != nil:
+		parts = append(parts, fmt.Sprintf("%s/%s: file expr does not parse as PromQL (%v); "+
+			"prometheus evaluates %q", loc.Key.Group, loc.Key.AlertName, fileErr, collapseWS(liveExpr)))
+	case liveErr != nil:
+		parts = append(parts, fmt.Sprintf("%s/%s: prometheus's expr does not parse as PromQL (%v); "+
+			"file says %q", loc.Key.Group, loc.Key.AlertName, liveErr, collapseWS(loc.ExprValue)))
+	case fileCanon != liveCanon:
 		parts = append(parts, fmt.Sprintf("file expr %q, prometheus evaluates %q",
 			collapseWS(loc.ExprValue), collapseWS(liveExpr)))
 	}
@@ -135,10 +160,26 @@ func parseForValue(s string) (time.Duration, error) {
 	return time.Duration(d), nil
 }
 
-func normaliseExpr(s string) string { return collapseWS(s) }
+// promqlParser is stateless across calls (see promql/parser.NewParser); one
+// instance is reused rather than constructed per comparison.
+var promqlParser = parser.NewParser(parser.Options{})
+
+// canonicalExpr parses expr as PromQL and renders it back through the
+// parser's own String(), so two spellings of the same query compare equal
+// by construction -- see DriftAgainst for why this replaced text
+// comparison.
+func canonicalExpr(expr string) (string, error) {
+	e, err := promqlParser.ParseExpr(expr)
+	if err != nil {
+		return "", err
+	}
+	return e.String(), nil
+}
 
 // collapseWS reduces every run of whitespace to a single space and trims the
-// ends -- see DriftAgainst for why an expression is compared this way.
+// ends. Used only for display in drift messages now -- the equality check
+// itself is semantic (see canonicalExpr) -- so an expression that fails to
+// parse can still be quoted readably in the finding.
 func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // Reconcile compares rule locations found on disk against the rule groups
