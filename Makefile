@@ -22,5 +22,7 @@ demo-down:
 demo-logs:
 	docker-compose -f demo/docker-compose.yml logs -f
 
+# -count=1 is mandatory, not decorative: without it Go's test cache can return
+# a PASS for an integration target that never touched the running stack.
 integration:
-	go test ./demo/... -tags=integration -v
+	go test ./demo/... -tags=integration -v -count=1
