@@ -37,7 +37,14 @@ demo-seed:
 	docker run --rm -v $(PWD)/demo/seed:/seed --entrypoint promtool prom/prometheus:v3.6.0 \
 		tsdb create-blocks-from openmetrics /seed/alerts.openmetrics /seed/blocks
 	docker-compose -f demo/docker-compose.yml stop prometheus
+	# Reset history before copying. Without this the volume ACCUMULATES: every
+	# re-seed leaves the previous run's blocks in place, so the same rule ends
+	# up with one series per seeding, episode counts multiply, and a label
+	# added between runs shows up as a second fingerprint for the same rule.
+	# demo-seed is a reset, not an append.
+	docker run --rm -v demo_promdata:/dst alpine \
+		sh -c 'rm -rf /dst/01* /dst/wal /dst/chunks_head'
 	docker run --rm -v $(PWD)/demo/seed/blocks:/src -v demo_promdata:/dst alpine \
 		sh -c 'cp -r /src/* /dst/'
 	docker-compose -f demo/docker-compose.yml start prometheus
-	@echo "seeded 30d of ALERTS history"
+	@echo "seeded 30d of ALERTS history (previous history discarded)"
