@@ -15,6 +15,7 @@ import (
 	"github.com/SaiPisey2/noisefloor/internal/collect"
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/remediate"
 	"github.com/SaiPisey2/noisefloor/internal/report"
 	"github.com/SaiPisey2/noisefloor/internal/score"
 	"github.com/SaiPisey2/noisefloor/internal/store"
@@ -83,6 +84,12 @@ confidence:
 # in one run, the scan refuses to deactivate them and names the missing rules
 # instead of silently shrinking the report.
 rules:
+  # A git checkout of the rule files Prometheus loads. Set this to get
+  # file+line locations for each rule (store.Rule.Line) and a warning for
+  # any mismatch between what's in these files and what Prometheus actually
+  # evaluates. Left blank, rules are still scored -- just without a location
+  # to point a remediation PR at.
+  # path: ./rules
   max_deactivated_fraction: 0.2
 `
 
@@ -207,8 +214,30 @@ func runScan(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Locate each rule in its source file, if a checkout was configured.
+	// Failures here are reported and otherwise ignored: rules.path being
+	// unset, stale, or pointed at the wrong place must not stop a scan --
+	// it only means store.Rule.Line stays 0 and remediation has nowhere to
+	// point a PR yet.
+	var lines map[remediate.RuleKey]int
+	if cfg.Rules.Path != "" {
+		locs, fileErrs, lerr := remediate.LocateRules(cfg.Rules.Path)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not read rules.path %s: %v\n", cfg.Rules.Path, lerr)
+		} else {
+			lines = remediate.LinesByKey(locs)
+			for _, fe := range fileErrs {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", fe)
+			}
+			for _, f := range remediate.Reconcile(locs, groups) {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", f)
+			}
+		}
+	}
+
 	now := time.Now().UTC()
-	ruleSync, err := collect.SyncRules(ctx, groups, db, now, cfg.Rules.MaxDeactivatedFraction)
+	ruleSync, err := collect.SyncRules(ctx, groups, db, now, cfg.Rules.MaxDeactivatedFraction, lines)
 	if err != nil {
 		return err
 	}

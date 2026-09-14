@@ -52,9 +52,11 @@ type Alertmanager struct {
 }
 
 type Rules struct {
-	// Path is reserved for issue #8 (PR-per-rule bot), which needs to locate
-	// the rule file a proposed change targets in order to open a PR against
-	// it. Unused today.
+	// Path is a git checkout of Prometheus rule files, walked by
+	// internal/remediate.LocateRules to find the file and line a rule
+	// lives at -- what issue #8 (PR-per-rule bot) needs to open a change
+	// against the right place. Live as of issue #9. Left empty, no
+	// location lookup runs and store.Rule.Line stays 0 for every rule.
 	Path string `yaml:"path"`
 
 	// MaxDeactivatedFraction guards against a broken rule file being mistaken

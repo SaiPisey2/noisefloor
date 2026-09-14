@@ -17,9 +17,13 @@ type Rule struct {
 	AlertName string
 	GroupName string
 	File      string
-	// Line is reserved for issue #8 (PR-per-rule bot), which needs to locate
-	// the exact line of the rule file a proposed change targets. Always zero
-	// today: nothing in the collection path sets it.
+	// Line is where this rule starts in File, 1-indexed. It is populated
+	// from internal/remediate.LocateRules, which walks a git checkout at
+	// config.Rules.Path and parses each rule file's YAML positions --
+	// see that package for how. Live as of issue #9; zero when rules.path
+	// is unset, when the rule could not be found under it (see
+	// remediate.MissingInFiles), or for any rule synced before that lookup
+	// ran.
 	Line        int
 	Expr        string
 	ExprHash    string

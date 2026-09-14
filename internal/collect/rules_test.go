@@ -78,7 +78,7 @@ func TestSyncRulesUpsertsAlertingRules(t *testing.T) {
 		}},
 	}}
 
-	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("SyncRules: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSyncRulesDeactivatesMissingRules(t *testing.T) {
 		Alerting: []prom.AlertingRule{{Name: "Alive", Query: "up == 0"}},
 	}}
 
-	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("SyncRules: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSyncRulesProceedsWithWarningOnSmallDrop(t *testing.T) {
 	}
 	groups := []prom.RuleGroup{{Name: "demo", Alerting: alerting}}
 
-	res, err := SyncRules(ctx, groups, db, now, 0.2)
+	res, err := SyncRules(ctx, groups, db, now, 0.2, nil)
 	if err != nil {
 		t.Fatalf("SyncRules: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSyncRulesRefusesOnLargeDrop(t *testing.T) {
 	}
 	groups := []prom.RuleGroup{{Name: "demo", Alerting: alerting}}
 
-	res, err := SyncRules(ctx, groups, db, now, 0.2)
+	res, err := SyncRules(ctx, groups, db, now, 0.2, nil)
 	if err == nil {
 		t.Fatal("SyncRules succeeded despite a 60% drop in active rules, want error")
 	}
@@ -234,7 +234,7 @@ func TestSyncRulesRefusesToDeactivateEverything(t *testing.T) {
 	}
 
 	// Prometheus now reports no alerting rules at all.
-	res, err := SyncRules(ctx, []prom.RuleGroup{}, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, []prom.RuleGroup{}, db, now, permissiveDeactivationFraction, nil)
 	if err == nil {
 		t.Fatal("expected an error when Prometheus reports zero rules but the store holds active ones")
 	}
@@ -311,7 +311,7 @@ func TestSyncRulesWithRealStoreAvoidsFalseRetuneOnFirstScan(t *testing.T) {
 		}},
 	}}
 
-	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("first SyncRules: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestSyncRulesWithRealStoreAvoidsFalseRetuneOnFirstScan(t *testing.T) {
 	}
 
 	// Second sync: same rule, same expression
-	res, err = SyncRules(ctx, groups, db, now.Add(time.Hour), permissiveDeactivationFraction)
+	res, err = SyncRules(ctx, groups, db, now.Add(time.Hour), permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("second SyncRules: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestSyncRulesWithRealStoreAvoidsFalseRetuneOnFirstScan(t *testing.T) {
 	}}
 
 	syncTime := now.Add(2 * time.Hour)
-	res, err = SyncRules(ctx, changedGroups, db, syncTime, permissiveDeactivationFraction)
+	res, err = SyncRules(ctx, changedGroups, db, syncTime, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("third SyncRules: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestSyncRulesReportsDuplicateAlertNames(t *testing.T) {
 		}},
 	}
 
-	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("SyncRules: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestSyncRulesReportsNoAmbiguityForDistinctNames(t *testing.T) {
 		{Name: "b", File: "b.yml", Alerting: []prom.AlertingRule{{Name: "Two", Query: "up == 0"}}},
 	}
 
-	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction)
+	res, err := SyncRules(ctx, groups, db, now, permissiveDeactivationFraction, nil)
 	if err != nil {
 		t.Fatalf("SyncRules: %v", err)
 	}

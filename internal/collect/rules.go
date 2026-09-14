@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
+	"github.com/SaiPisey2/noisefloor/internal/remediate"
 	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
@@ -81,7 +82,13 @@ func RetunedDuring(r store.Rule, windowStart time.Time) bool {
 // maxDeactivatedFraction is config.Rules.MaxDeactivatedFraction: above that
 // share of previously active rules disappearing in one run, SyncRules refuses
 // rather than deactivating them. See the field's doc comment for why.
-func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now time.Time, maxDeactivatedFraction float64) (RuleSyncResult, error) {
+//
+// lines maps (group, alertname) to the rule's starting line in its source
+// file -- internal/remediate.LinesByKey's output from LocateRules against
+// config.Rules.Path. It is nil-safe: a nil or incomplete map (rules.path
+// unset, or a rule LocateRules could not find, which Reconcile also reports
+// as a MissingInFiles finding) simply leaves store.Rule.Line at 0.
+func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now time.Time, maxDeactivatedFraction float64, lines map[remediate.RuleKey]int) (RuleSyncResult, error) {
 	before, err := db.ListRules(ctx)
 	if err != nil {
 		return RuleSyncResult{}, fmt.Errorf("list existing rules: %w", err)
@@ -111,6 +118,7 @@ func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now t
 				AlertName:   r.Name,
 				GroupName:   g.Name,
 				File:        g.File,
+				Line:        lines[remediate.RuleKey{Group: g.Name, AlertName: r.Name}],
 				Expr:        r.Query,
 				ExprHash:    ExprHash(r.Query),
 				For:         r.For,
