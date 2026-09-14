@@ -100,6 +100,34 @@ func TestLoadRejectsNonPositiveFlapWindow(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesRetryDefaults(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Prometheus.RetryAttempts != 3 {
+		t.Errorf("retry_attempts = %d, want the default of 3", cfg.Prometheus.RetryAttempts)
+	}
+	if cfg.Prometheus.RetryBaseDelay.Std() != time.Second {
+		t.Errorf("retry_base_delay = %v, want the default of 1s", cfg.Prometheus.RetryBaseDelay.Std())
+	}
+}
+
+func TestLoadRejectsNonPositiveRetryAttempts(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\n  retry_attempts: 0\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with retry_attempts = 0, want error")
+	}
+}
+
+func TestLoadRejectsNonPositiveRetryBaseDelay(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\n  retry_base_delay: 0s\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with retry_base_delay = 0, want error")
+	}
+}
+
 func TestDefaultWeightsSumToOne(t *testing.T) {
 	if sum := Default().Weights.Sum(); sum < 0.999 || sum > 1.001 {
 		t.Errorf("default weights sum = %v, want 1.0", sum)

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 
 	"github.com/SaiPisey2/noisefloor/internal/config"
@@ -21,11 +22,25 @@ type fakeProm struct {
 	// failure can be exercised.
 	failAt   int
 	queryErr error
+
+	// failTimes, when non-zero, makes the first failTimes calls fail with
+	// queryErr and every call after that succeed -- a transient failure that
+	// clears up, for exercising retry-then-succeed.
+	failTimes int
+
+	// alwaysFail makes every call fail with queryErr -- a failure that never
+	// clears up, for exercising exhausted retries and cancellation mid-backoff.
+	alwaysFail bool
 }
 
 func (f *fakeProm) QueryRange(_ context.Context, _ string, start, end time.Time, _ time.Duration) (model.Matrix, error) {
 	f.calls = append(f.calls, [2]time.Time{start, end})
-	if f.failAt != 0 && len(f.calls) == f.failAt {
+	switch {
+	case f.alwaysFail:
+		return nil, f.queryErr
+	case f.failTimes != 0 && len(f.calls) <= f.failTimes:
+		return nil, f.queryErr
+	case f.failAt != 0 && len(f.calls) == f.failAt:
 		return nil, f.queryErr
 	}
 	if f.matrixFn == nil {
@@ -99,6 +114,10 @@ func testConfig() config.Config {
 	cfg.Prometheus.URL = "http://test"
 	cfg.Prometheus.Step = config.Duration(time.Minute)
 	cfg.Prometheus.Chunk = config.Duration(6 * time.Hour)
+	// Real retries, but fast: these tests exercise the retry loop itself, not
+	// how long it waits.
+	cfg.Prometheus.RetryAttempts = 3
+	cfg.Prometheus.RetryBaseDelay = config.Duration(5 * time.Millisecond)
 	return cfg
 }
 
@@ -317,10 +336,13 @@ func TestStitchThresholdMatchesBuildIntervalsGapRule(t *testing.T) {
 }
 
 // TestRunReturnsPartialResultOnMidChunkQueryError exercises the query-error
-// path, which a fake that can never fail leaves untested.
+// path, which a fake that can never fail leaves untested. The injected error
+// is non-retryable (bad_data, as a 400/422 from Prometheus would be), so it
+// must fail the chunk on the first attempt rather than being absorbed by a
+// retry.
 func TestRunReturnsPartialResultOnMidChunkQueryError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	wantErr := errors.New("prometheus unavailable")
+	wantErr := &v1.Error{Type: v1.ErrBadData, Msg: "bad query"}
 
 	// 24h window / 6h chunk = 4 chunks; fail on the second.
 	p := &fakeProm{
@@ -342,6 +364,141 @@ func TestRunReturnsPartialResultOnMidChunkQueryError(t *testing.T) {
 	if res.WindowStart.IsZero() || res.WindowEnd.IsZero() {
 		t.Error("WindowStart/WindowEnd are zero; Run must describe the window " +
 			"it was working on even when it fails mid-chunk")
+	}
+	// Exactly 2 calls: bad_data must not burn any retry attempts.
+	if len(p.calls) != 2 {
+		t.Errorf("made %d calls, want exactly 2 (chunk 1, then chunk 2's single "+
+			"non-retryable attempt); a non-retryable error must fail immediately",
+			len(p.calls))
+	}
+}
+
+// TestRunRetriesTransientFailureThenSucceeds exercises the "fails twice then
+// succeeds" path required for issue #4: a transient error must not abort the
+// scan when a later attempt would have worked.
+func TestRunRetriesTransientFailureThenSucceeds(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	p := &fakeProm{
+		failTimes: 2,
+		queryErr:  errors.New("connection reset by peer"),
+		matrixFn: func(cs, ce time.Time) model.Matrix {
+			return model.Matrix{{
+				Metric: model.Metric{
+					"__name__": "ALERTS", "alertname": "Flaky",
+					"alertstate": "firing", "instance": "x",
+				},
+				Values: []model.SamplePair{{
+					Timestamp: model.TimeFromUnix(cs.Unix()), Value: 1,
+				}},
+			}}
+		},
+	}
+	fs := newFakeStore().withRule("Flaky")
+	cfg := testConfig()
+	cfg.Prometheus.RetryAttempts = 3 // 2 failures + 1 success fits inside 3 attempts
+
+	res, err := New(p, fs, cfg).Run(context.Background(), now.Add(-6*time.Hour), now)
+	if err != nil {
+		t.Fatalf("Run: want the retry to absorb the transient failure, got: %v", err)
+	}
+	if len(fs.episodes) == 0 {
+		t.Fatal("no episodes recorded; the retried query's data was lost")
+	}
+	if res.Episodes == 0 {
+		t.Error("BackfillResult.Episodes = 0, want the episode from the eventual success")
+	}
+}
+
+// TestRunExhaustsRetriesAndReturnsPartialResult covers a failure that never
+// clears up: attempts must be bounded, and what earlier chunks already wrote
+// must survive in the returned, non-zero BackfillResult.
+func TestRunExhaustsRetriesAndReturnsPartialResult(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	from := now.Add(-24 * time.Hour) // 4 chunks at the 6h test chunk size
+
+	// failAfterFirstChunk below only ever lets this matrixFn run once (for the
+	// first chunk), so it can unconditionally return the "Good" episode.
+	p := &fakeProm{
+		matrixFn: func(cs, ce time.Time) model.Matrix {
+			return model.Matrix{{
+				Metric: model.Metric{
+					"__name__": "ALERTS", "alertname": "Good",
+					"alertstate": "firing", "instance": "x",
+				},
+				Values: []model.SamplePair{{
+					Timestamp: model.TimeFromUnix(cs.Unix()), Value: 1,
+				}},
+			}}
+		},
+	}
+	fs := newFakeStore().withRule("Good")
+	cfg := testConfig()
+	cfg.Prometheus.RetryAttempts = 3
+
+	// Fail every call from the second chunk onward, permanently.
+	failing := &failAfterFirstChunk{fakeProm: p}
+	res, err := New(failing, fs, cfg).Run(context.Background(), from, now)
+	if err == nil {
+		t.Fatal("Run: want an error once retries are exhausted, got nil")
+	}
+	if res.Chunks == 0 || res.WindowStart.IsZero() || res.WindowEnd.IsZero() {
+		t.Errorf("BackfillResult is effectively zero: %+v", res)
+	}
+	if len(fs.episodes) == 0 {
+		t.Error("earlier, successfully flushed chunks were discarded by the later failure")
+	}
+	if failing.calls != 1+cfg.Prometheus.RetryAttempts {
+		t.Errorf("made %d calls, want exactly %d (1 successful chunk + %d attempts "+
+			"on the permanently failing chunk)",
+			failing.calls, 1+cfg.Prometheus.RetryAttempts, cfg.Prometheus.RetryAttempts)
+	}
+}
+
+// failAfterFirstChunk lets the wrapped fakeProm answer its first call
+// normally, then fails every call after that with a retryable error -- a
+// permanent, transient-looking failure starting on the second chunk.
+type failAfterFirstChunk struct {
+	*fakeProm
+	calls int
+}
+
+func (f *failAfterFirstChunk) QueryRange(ctx context.Context, q string, start, end time.Time, step time.Duration) (model.Matrix, error) {
+	f.calls++
+	if f.calls == 1 {
+		return f.fakeProm.QueryRange(ctx, q, start, end, step)
+	}
+	return nil, errors.New("connection reset by peer")
+}
+
+// TestRunCancelsDuringBackoffPromptly is the cancellation requirement: a
+// scan timeout or Ctrl-C during the back-off wait must return promptly, not
+// after the full delay elapses.
+func TestRunCancelsDuringBackoffPromptly(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p := &fakeProm{alwaysFail: true, queryErr: errors.New("connection reset by peer")}
+
+	cfg := testConfig()
+	cfg.Prometheus.RetryAttempts = 5
+	// Deliberately long: if cancellation is not honoured promptly, the test
+	// either times out or takes multiple seconds instead of well under one.
+	cfg.Prometheus.RetryBaseDelay = config.Duration(2 * time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := New(p, newFakeStore(), cfg).Run(ctx, now.Add(-time.Hour), now)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Run took %v to return after cancellation during back-off, "+
+			"want well under the 2s backoff delay", elapsed)
 	}
 }
 

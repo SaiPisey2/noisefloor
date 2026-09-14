@@ -121,6 +121,10 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 	// Accumulate per-series intervals across chunks, then stitch, so an
 	// episode spanning a boundary is not reported as two.
 	accum := map[seriesKey]*prom.SeriesEpisodes{}
+	// ruleIDs caches the alertname -> rule ID lookup across chunks, so a
+	// series that reappears in every chunk of a long scan is looked up (or,
+	// for an orphan, upserted) once rather than once per chunk it spans.
+	ruleIDs := map[string]int64{}
 
 	for start := res.WindowStart; start.Before(res.WindowEnd); start = start.Add(chunk) {
 		end := start.Add(chunk)
@@ -129,8 +133,11 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 		}
 		res.Chunks++
 
-		m, err := b.prom.QueryRange(ctx, `ALERTS`, start, end, step)
+		m, err := b.queryRangeWithRetry(ctx, `ALERTS`, start, end, step)
 		if err != nil {
+			// Whatever earlier chunks already settled was flushed to the
+			// store as each chunk completed -- see flush below -- so this
+			// failure costs only the chunk it happened on, not the scan.
 			return res, fmt.Errorf("backfill chunk %s..%s: %w",
 				start.Format(time.RFC3339), end.Format(time.RFC3339), err)
 		}
@@ -145,36 +152,94 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 			}
 			existing.Intervals = stitch(existing.Intervals, se.Intervals, step)
 		}
+
+		// Persist everything provably settled as of this chunk boundary -- see
+		// flush's doc comment for exactly what that means and why it is safe
+		// even for a series this chunk never mentioned.
+		if err := b.flush(ctx, &res, accum, ruleIDs, step, end, false); err != nil {
+			return res, err
+		}
 	}
 
+	if err := b.flush(ctx, &res, accum, ruleIDs, step, res.WindowEnd, true); err != nil {
+		return res, err
+	}
+
+	// Exact, not probabilistic: the first episode is the first thing Prometheus
+	// could still tell us about. One chunk of slack, because a rule that simply
+	// did not fire in the first chunk is not a retention edge.
+	res.Truncated = !res.EarliestData.IsZero() && res.EarliestData.Sub(from) > chunk
+
+	return res, nil
+}
+
+// flush persists every settled interval in accum and updates res as it goes.
+//
+// "Settled" means: every interval of a series except possibly its last one,
+// which stays held back only while a future chunk could still stitch onto
+// it. stitch merges a series' last interval with a later chunk's first one
+// when the gap between them is at most one step (see stitch's doc comment),
+// and chunks are queried back-to-back, so the earliest a next occurrence of
+// a series could possibly start is exactly chunkEnd. That means the last
+// interval is ALSO settled, this chunk, the moment
+// chunkEnd.Sub(last.End) > step: no sample any later chunk can return would
+// be close enough to merge. A series this chunk never mentioned is checked
+// against the same rule using its existing last interval, so a rule that
+// simply stops firing gets flushed a bare one chunk later, not held until
+// the whole window has been scanned. When final is true there is no later
+// chunk at all, so everything flushes regardless.
+//
+// Flushed intervals are removed from accum: a settled interval is written
+// once, not re-upserted on every subsequent chunk it is no longer part of.
+func (b *Backfiller) flush(ctx context.Context, res *BackfillResult, accum map[seriesKey]*prom.SeriesEpisodes, ruleIDs map[string]int64, step time.Duration, chunkEnd time.Time, final bool) error {
 	var toInsert []store.Episode
 	now := time.Now().UTC()
 
 	for k, se := range accum {
-		// The ALERTS series carries an alertname but no group. The rules
-		// collector has already created every rule Prometheus evaluates, so
-		// look the rule up rather than inventing one with an empty group,
-		// which would create a second row for a rule that already exists.
-		ruleID, found, err := b.db.RuleIDByAlertName(ctx, k.alertName)
-		if err != nil {
-			return res, fmt.Errorf("lookup rule %s: %w", k.alertName, err)
+		n := len(se.Intervals)
+		if n == 0 {
+			continue
 		}
-		if !found {
-			// No live rule by this name: the series belongs to a rule
-			// Prometheus no longer defines. Keep the history, but record it
-			// inactive so it is never scored or proposed for change.
-			ruleID, err = b.db.UpsertRule(ctx, &store.Rule{
-				AlertName: k.alertName,
-				GroupName: "",
-				FirstSeen: now,
-				LastSeen:  now,
-				Active:    false,
-			})
+		settled := n - 1
+		if final || chunkEnd.Sub(se.Intervals[n-1].End) > step {
+			settled = n
+		}
+		if settled <= 0 {
+			continue
+		}
+
+		ruleID, ok := ruleIDs[k.alertName]
+		if !ok {
+			// The ALERTS series carries an alertname but no group. The rules
+			// collector has already created every rule Prometheus evaluates,
+			// so look the rule up rather than inventing one with an empty
+			// group, which would create a second row for a rule that already
+			// exists.
+			found := false
+			var err error
+			ruleID, found, err = b.db.RuleIDByAlertName(ctx, k.alertName)
 			if err != nil {
-				return res, fmt.Errorf("record orphaned rule %s: %w", k.alertName, err)
+				return fmt.Errorf("lookup rule %s: %w", k.alertName, err)
 			}
+			if !found {
+				// No live rule by this name: the series belongs to a rule
+				// Prometheus no longer defines. Keep the history, but record
+				// it inactive so it is never scored or proposed for change.
+				ruleID, err = b.db.UpsertRule(ctx, &store.Rule{
+					AlertName: k.alertName,
+					GroupName: "",
+					FirstSeen: now,
+					LastSeen:  now,
+					Active:    false,
+				})
+				if err != nil {
+					return fmt.Errorf("record orphaned rule %s: %w", k.alertName, err)
+				}
+			}
+			ruleIDs[k.alertName] = ruleID
 		}
-		for _, iv := range se.Intervals {
+
+		for _, iv := range se.Intervals[:settled] {
 			if res.EarliestData.IsZero() || iv.Start.Before(res.EarliestData) {
 				res.EarliestData = iv.Start
 			}
@@ -191,18 +256,61 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 				State:      se.State,
 			})
 		}
-	}
 
-	// Exact, not probabilistic: the first episode is the first thing Prometheus
-	// could still tell us about. One chunk of slack, because a rule that simply
-	// did not fire in the first chunk is not a retention edge.
-	res.Truncated = !res.EarliestData.IsZero() && res.EarliestData.Sub(from) > chunk
+		if settled == n {
+			// Nothing left to hold onto -- including the final-flush case,
+			// where settled == n unconditionally.
+			delete(accum, k)
+		} else {
+			se.Intervals = se.Intervals[settled:]
+		}
+	}
 
 	if err := b.db.InsertEpisodes(ctx, toInsert); err != nil {
-		return res, fmt.Errorf("persist episodes: %w", err)
+		return fmt.Errorf("persist episodes: %w", err)
 	}
-	res.Episodes = len(toInsert)
-	return res, nil
+	res.Episodes += len(toInsert)
+	return nil
+}
+
+// queryRangeWithRetry wraps Querier.QueryRange with bounded, exponential
+// back-off. Only retryable failures -- see prom.IsRetryable -- burn a wait;
+// a 400/422 or any other failure that will recur identically fails on the
+// first attempt, and a canceled context is never waited out, whether it is
+// canceled before the query, during it, or while this is backing off.
+func (b *Backfiller) queryRangeWithRetry(ctx context.Context, query string, start, end time.Time, step time.Duration) (model.Matrix, error) {
+	attempts := b.cfg.Prometheus.RetryAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	base := b.cfg.Prometheus.RetryBaseDelay.Std()
+	if base <= 0 {
+		base = time.Second
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		m, err := b.prom.QueryRange(ctx, query, start, end, step)
+		if err == nil {
+			return m, nil
+		}
+		lastErr = err
+
+		if attempt == attempts || !prom.IsRetryable(err) {
+			return nil, err
+		}
+
+		delay := base << (attempt - 1) // base, 2*base, 4*base, ...
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	// Unreachable: the loop above always returns on its last iteration.
+	return nil, lastErr
 }
 
 // stitch appends next to prev, merging the boundary pair when they are close

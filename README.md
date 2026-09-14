@@ -137,6 +137,18 @@ fires count as off-hours, which is a scored signal, so `Local` would let the
 same database produce different verdicts on a CET laptop and in a UTC CI
 container. Set your team's working timezone if it is not UTC.
 
+`prometheus.retry_attempts` (default 3) and `prometheus.retry_base_delay`
+(default `1s`) control retry on a chunked `ALERTS` query. A 30-day scan at
+the default 6h chunk issues 120 of these; a single transient failure --
+a 503, a timeout, a connection reset -- used to abort the whole scan and
+discard every chunk already reconstructed. Only failures worth retrying
+actually wait: a 400 or 422 from Prometheus (a bad query) fails immediately
+without spending an attempt, since it will fail identically on retry, and
+neither Ctrl-C nor the scan timeout sits through a back-off delay. Episodes
+are written to the store as each chunk settles, not only at the end, so a
+failure that exhausts every attempt still leaves everything reconstructed
+before it in the database.
+
 `flap_window` decides how soon a re-fire on the same series counts as
 flapping (feeds `flap_rate`, weighted above). It defaults to `1h`, unchanged
 from before this was configurable. It is a fixed, absolute duration, not
@@ -206,6 +218,13 @@ and deliberately healthy alerts, then seeds 30 days of history.
 
 - Episode precision is bounded by the query step; alerts shorter than one step
   are undercounted.
+- A chunk that still fails after every retry attempt aborts the scan, same as
+  before retries existed -- retry absorbs transient failures, it does not
+  make Prometheus unavailability invisible. Episodes settled in earlier
+  chunks are already written to the store by then, but each series' most
+  recently observed episode is deliberately held back until either the next
+  chunk confirms it did not continue, or the whole scan finishes -- so it may
+  not be written until a later, successful scan re-observes it.
 - History is bounded by Prometheus retention. The whole requested window is
   always queried -- Prometheus simply returns nothing outside retention -- and
   when the earliest episode found is well inside the window the report says

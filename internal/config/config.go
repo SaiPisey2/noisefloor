@@ -32,6 +32,18 @@ type Prometheus struct {
 	Step  Duration `yaml:"step"`
 	Chunk Duration `yaml:"chunk"`
 	Auth  Auth     `yaml:"auth"`
+
+	// RetryAttempts is the maximum number of tries per chunk query,
+	// including the first: 1 means no retry. A transient error on chunk 87
+	// of 120 used to abort the whole scan and discard the other 119 chunks'
+	// worth of work; retrying here means one bad response no longer costs
+	// the rest of the scan.
+	RetryAttempts int `yaml:"retry_attempts"`
+	// RetryBaseDelay is the backoff base: attempt N (1-indexed) after a
+	// retryable failure waits RetryBaseDelay * 2^(N-1), so the default 1s
+	// backs off 1s, 2s, 4s, ... Only retryable failures wait at all -- see
+	// prom.IsRetryable -- and a canceled context is never waited out.
+	RetryBaseDelay Duration `yaml:"retry_base_delay"`
 }
 
 type Alertmanager struct {
@@ -83,8 +95,10 @@ type Confidence struct {
 func Default() Config {
 	return Config{
 		Prometheus: Prometheus{
-			Step:  Duration(time.Minute),
-			Chunk: Duration(6 * time.Hour),
+			Step:           Duration(time.Minute),
+			Chunk:          Duration(6 * time.Hour),
+			RetryAttempts:  3,
+			RetryBaseDelay: Duration(time.Second),
 		},
 		Database: "noisefloor.db",
 		Window:   Duration(30 * 24 * time.Hour),
@@ -139,6 +153,12 @@ func (c Config) Validate() error {
 	if c.Prometheus.Chunk.Std() < c.Prometheus.Step.Std() {
 		return fmt.Errorf("prometheus.chunk (%v) must be >= prometheus.step (%v)",
 			c.Prometheus.Chunk, c.Prometheus.Step)
+	}
+	if c.Prometheus.RetryAttempts < 1 {
+		return fmt.Errorf("prometheus.retry_attempts must be >= 1, got %d", c.Prometheus.RetryAttempts)
+	}
+	if c.Prometheus.RetryBaseDelay.Std() <= 0 {
+		return fmt.Errorf("prometheus.retry_base_delay must be positive")
 	}
 	if c.Window.Std() <= 0 {
 		return fmt.Errorf("window must be positive")

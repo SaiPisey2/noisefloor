@@ -24,6 +24,14 @@ const sampleConfig = `prometheus:
   url: http://localhost:9090
   step: 1m
   chunk: 6h
+  # A single chunk query can fail transiently (a 503, a timeout, a connection
+  # reset) without the rest of the scan being at fault. retry_attempts is the
+  # max tries per chunk, including the first (1 = no retry); each retryable
+  # failure backs off retry_base_delay * 2^(attempt-1) -- 1s, 2s, 4s at the
+  # defaults below. A 400/422 (a bad query) or other non-transient failure is
+  # never retried, and Ctrl-C or the scan timeout is never waited out.
+  retry_attempts: 3
+  retry_base_delay: 1s
   # Prometheus and Alertmanager often sit behind different gateways, so each
   # takes its own auth block. Uncomment and fill in what your setup needs;
   # bearer, basic and tls can all be left out for an unauthenticated demo.
