@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -71,21 +72,36 @@ func scenarios() []scenario {
 		// verdict alone instead of flap_rate routing it to tune.
 		{
 			alertname: "DemoCauseA", severity: "warning",
+			labels: map[string]string{"component": "a"},
 			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseB", severity: "warning",
+			labels: map[string]string{"component": "b"},
 			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseC", severity: "warning",
+			labels: map[string]string{"component": "c"},
 			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseD", severity: "warning",
+			labels: map[string]string{"component": "d"},
 			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 	}
+}
+
+// sortedKeys keeps label order deterministic, so regenerating the seed file
+// produces byte-identical output for the same inputs.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func mod(a, b float64) float64 {
@@ -111,9 +127,18 @@ func Generate(w io.Writer, start, end time.Time, step time.Duration) error {
 				continue
 			}
 			ts := start.Add(time.Duration(t) * time.Second).Unix()
+			// Extra labels must match what the live rule produces. A seeded
+			// episode that lacks a label the live rule adds becomes a second
+			// fingerprint for the same rule, and a 600-to-1 split across two
+			// fingerprints scores a concentration near 1.0 -- which routes the
+			// rule to `tune` on the strength of a fixture artefact.
+			extra := ""
+			for _, k := range sortedKeys(sc.labels) {
+				extra += fmt.Sprintf(",%s=%q", k, sc.labels[k])
+			}
 			line := fmt.Sprintf(
-				`ALERTS{alertname=%q,alertstate="firing",severity=%q,instance="faultgen:8080",job="faultgen"} 1 %d`,
-				sc.alertname, sc.severity, ts)
+				`ALERTS{alertname=%q,alertstate="firing",severity=%q,instance="faultgen:8080",job="faultgen"%s} 1 %d`,
+				sc.alertname, sc.severity, extra, ts)
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
 			}

@@ -37,6 +37,31 @@ func TestGenerateProducesOpenMetrics(t *testing.T) {
 	if strings.Contains(out, "DemoQuiet") {
 		t.Error("DemoQuiet must never appear; it is the never-fires control")
 	}
+
+	// The seeded series must carry the same labels the live rule produces,
+	// or a seeded episode becomes a second fingerprint for the same rule and
+	// concentration reads as an artefact of the fixture instead of the rule.
+	var causeLine, spikyLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, `alertname="DemoCauseA"`):
+			causeLine = line
+		case strings.Contains(line, `alertname="DemoSpiky"`):
+			spikyLine = line
+		}
+	}
+	if causeLine == "" {
+		t.Fatal("no DemoCauseA sample line found")
+	}
+	if !strings.Contains(causeLine, `component="a"`) {
+		t.Errorf("DemoCauseA sample missing component label, got: %s", causeLine)
+	}
+	if spikyLine == "" {
+		t.Fatal("no DemoSpiky sample line found")
+	}
+	if strings.Contains(spikyLine, "component=") {
+		t.Errorf("DemoSpiky's live rule adds no component label; seeded sample must not either, got: %s", spikyLine)
+	}
 }
 
 // TestScenarioOffPeriodsExceedGapTolerance guards the property the whole demo
