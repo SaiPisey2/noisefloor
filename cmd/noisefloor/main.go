@@ -255,7 +255,7 @@ func runScan(args []string) error {
 			Silences:    silences,
 			Location:    cfg.Location(),
 		})
-		noise, confidence, verdict := score.Evaluate(signals, window, cfg)
+		noise, confidence, verdict := score.Evaluate(signals, r, window, now, cfg)
 
 		// A rule retuned inside the window earned these episodes under an
 		// expression that no longer exists. Report the numbers, withhold the

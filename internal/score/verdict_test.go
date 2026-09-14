@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
 func defaultWeights() config.Weights { return config.Default().Weights }
@@ -80,7 +81,7 @@ func TestVerdictKeepsWhenConfidenceIsLow(t *testing.T) {
 	noise := NoiseScore(s, defaultWeights())
 	conf := Confidence(s, 30*24*time.Hour, defaultConfidence())
 
-	if got := Verdict(s, noise, conf); got != VerdictKeep {
+	if got := Verdict(s, noise, conf, defaultConfidence()); got != VerdictKeep {
 		t.Errorf("verdict = %q, want %q; thin data must never propose a deletion", got, VerdictKeep)
 	}
 }
@@ -88,7 +89,7 @@ func TestVerdictKeepsWhenConfidenceIsLow(t *testing.T) {
 func TestVerdictRetiresSelfResolvingSilencedRule(t *testing.T) {
 	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5, P50Duration: time.Minute})
 	noise := NoiseScore(s, defaultWeights())
-	if got := Verdict(s, noise, 1.0); got != VerdictRetire {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictRetire {
 		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictRetire, noise)
 	}
 }
@@ -98,7 +99,7 @@ func TestVerdictTunesFlappingRuleRatherThanRetiringIt(t *testing.T) {
 	// not deletion.
 	s := confident(Signals{ShortLivedRate: 0.9, FlapRate: 0.8, SilencedRate: 0.4})
 	noise := NoiseScore(s, defaultWeights())
-	if got := Verdict(s, noise, 1.0); got != VerdictTune {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictTune {
 		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictTune, noise)
 	}
 }
@@ -110,7 +111,7 @@ func TestVerdictTunesConcentratedRule(t *testing.T) {
 	// happen to land on one host.
 	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5, Concentration: 0.8})
 	noise := NoiseScore(s, defaultWeights())
-	if got := Verdict(s, noise, 1.0); got != VerdictTune {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictTune {
 		t.Errorf("verdict = %q, want %q", got, VerdictTune)
 	}
 }
@@ -118,7 +119,7 @@ func TestVerdictTunesConcentratedRule(t *testing.T) {
 func TestVerdictAutomatesFrequentRealAlerts(t *testing.T) {
 	s := confident(Signals{ShortLivedRate: 0.05, P50Duration: 40 * time.Minute})
 	noise := NoiseScore(s, defaultWeights())
-	if got := Verdict(s, noise, 1.0); got != VerdictAutomate {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictAutomate {
 		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictAutomate, noise)
 	}
 }
@@ -127,16 +128,19 @@ func TestVerdictKeepsHealthyRule(t *testing.T) {
 	s := confident(Signals{ShortLivedRate: 0.1, P50Duration: 5 * time.Minute})
 	s.Fires = 12
 	noise := NoiseScore(s, defaultWeights())
-	if got := Verdict(s, noise, 1.0); got != VerdictKeep {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictKeep {
 		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictKeep, noise)
 	}
 }
 
 func TestEvaluateReturnsAllThree(t *testing.T) {
 	cfg := config.Default()
+	now := time.Unix(1_700_000_000, 0).UTC()
 	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5})
+	s.FirstEpisode = now.Add(-30 * 24 * time.Hour)
+	r := store.Rule{FirstSeen: now.Add(-30 * 24 * time.Hour)}
 
-	noise, conf, verdict := Evaluate(s, 30*24*time.Hour, cfg)
+	noise, conf, verdict := Evaluate(s, r, 30*24*time.Hour, now, cfg)
 	if noise <= 0 {
 		t.Errorf("noise = %v, want > 0", noise)
 	}
@@ -161,7 +165,7 @@ func TestVerdictAutomatesDespiteConcentration(t *testing.T) {
 		t.Fatalf("fixture noise %.1f is not below the threshold; the test no "+
 			"longer exercises the quiet-but-concentrated path", noise)
 	}
-	if got := Verdict(s, noise, 1.0); got != VerdictAutomate {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictAutomate {
 		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictAutomate, noise)
 	}
 }
@@ -211,7 +215,7 @@ func TestPureSelfResolverIsExactlyActionable(t *testing.T) {
 			"the threshold's stated rationale no longer holds",
 			noise, noisyThreshold)
 	}
-	if got := Verdict(s, noise, 1.0); got != VerdictRetire {
+	if got := Verdict(s, noise, 1.0, defaultConfidence()); got != VerdictRetire {
 		t.Errorf("verdict = %q, want %q", got, VerdictRetire)
 	}
 }
@@ -236,7 +240,7 @@ func TestVerdictBoundariesAreInclusive(t *testing.T) {
 		s := base
 		s.ShortLivedRate, s.SilencedRate = 0.9, 0.5
 		noise := NoiseScore(s, defaultWeights())
-		if got := Verdict(s, noise, minConfidence); got == VerdictKeep {
+		if got := Verdict(s, noise, minConfidence, defaultConfidence()); got == VerdictKeep {
 			t.Errorf("confidence exactly %.2f was gated to keep; the gate is "+
 				"documented as allowing it through", minConfidence)
 		}
@@ -244,7 +248,7 @@ func TestVerdictBoundariesAreInclusive(t *testing.T) {
 
 	t.Run("noise exactly at the threshold", func(t *testing.T) {
 		s := base
-		if got := Verdict(s, noisyThreshold, 1.0); got != VerdictRetire {
+		if got := Verdict(s, noisyThreshold, 1.0, defaultConfidence()); got != VerdictRetire {
 			t.Errorf("noise exactly %.0f gave %q, want %q",
 				float64(noisyThreshold), got, VerdictRetire)
 		}
@@ -253,7 +257,7 @@ func TestVerdictBoundariesAreInclusive(t *testing.T) {
 	t.Run("flap rate exactly at the tune threshold", func(t *testing.T) {
 		s := base
 		s.FlapRate = flapTuneThreshold
-		if got := Verdict(s, 10, 1.0); got != VerdictTune {
+		if got := Verdict(s, 10, 1.0, defaultConfidence()); got != VerdictTune {
 			t.Errorf("flap rate exactly %.2f gave %q, want %q",
 				flapTuneThreshold, got, VerdictTune)
 		}
@@ -262,9 +266,121 @@ func TestVerdictBoundariesAreInclusive(t *testing.T) {
 	t.Run("fires exactly at the automate minimum", func(t *testing.T) {
 		s := Signals{Fires: automateMinFires, UniqueFingerprints: 2,
 			ShortLivedRate: 0.1, P50Duration: automateMinDuration}
-		if got := Verdict(s, 5, 1.0); got != VerdictAutomate {
+		if got := Verdict(s, 5, 1.0, defaultConfidence()); got != VerdictAutomate {
 			t.Errorf("fires exactly %d with duration exactly %v gave %q, want %q",
 				automateMinFires, automateMinDuration, got, VerdictAutomate)
 		}
 	})
+}
+
+// TestVerdictHonoursMinEpisodesAsAFloor pins the contract the config promises.
+// Confidence is min(fires/min_episodes, window/min_window) and the gate is
+// 0.5, so relying on the ratio alone handed out verdicts at HALF the
+// configured min_episodes. A user reading `min_episodes: 10` reasonably
+// expects 10 to be the floor.
+func TestVerdictHonoursMinEpisodesAsAFloor(t *testing.T) {
+	c := defaultConfidence() // min_episodes 10
+	window := 30 * 24 * time.Hour
+
+	// Nine fires: one short of the floor, and every other signal damning.
+	justUnder := Signals{Fires: 9, UniqueFingerprints: 3, ShortLivedRate: 1, SilencedRate: 1}
+	noise := NoiseScore(justUnder, defaultWeights())
+	conf := Confidence(justUnder, window, c)
+	if conf < minConfidence {
+		t.Fatalf("fixture confidence %.2f is already below the gate; this test "+
+			"would pass without the episode floor", conf)
+	}
+	if got := Verdict(justUnder, noise, conf, c); got != VerdictKeep {
+		t.Errorf("verdict at %d fires = %q, want %q; min_episodes is %d",
+			justUnder.Fires, got, VerdictKeep, c.MinEpisodes)
+	}
+
+	// Ten fires: exactly the floor, which is inclusive.
+	atFloor := justUnder
+	atFloor.Fires = c.MinEpisodes
+	if got := Verdict(atFloor, noise, Confidence(atFloor, window, c), c); got != VerdictRetire {
+		t.Errorf("verdict at exactly %d fires = %q, want %q; the floor is inclusive",
+			c.MinEpisodes, got, VerdictRetire)
+	}
+}
+
+// TestObservedWindowIsBoundedByRuleAge pins the other half of the confidence
+// contract. A rule added today that fires 12 times while being tuned must not
+// report confidence 1.00 tomorrow.
+func TestObservedWindowIsBoundedByRuleAge(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	scan := 30 * 24 * time.Hour
+
+	t.Run("a rule one day old is worth one day", func(t *testing.T) {
+		r := store.Rule{FirstSeen: now.Add(-24 * time.Hour)}
+		s := Signals{Fires: 12, FirstEpisode: now.Add(-20 * time.Hour)}
+		if got := ObservedWindow(s, r, scan, now); got != 24*time.Hour {
+			t.Errorf("observed window = %v, want 24h", got)
+		}
+		// 1 day against a 14 day minimum is 0.07, well under the gate.
+		conf := Confidence(s, ObservedWindow(s, r, scan, now), defaultConfidence())
+		if conf >= minConfidence {
+			t.Errorf("confidence = %.2f, want below %.2f for a one-day-old rule",
+				conf, minConfidence)
+		}
+	})
+
+	t.Run("an old rule met today keeps the full window", func(t *testing.T) {
+		// FirstSeen is `now` on a first scan for EVERY rule. If that alone
+		// bounded the window, the first scan would return keep for everything
+		// and the whole retroactive-history trick would be worthless. The
+		// episodes are the evidence that the rule is older than our acquaintance
+		// with it.
+		r := store.Rule{FirstSeen: now}
+		s := Signals{Fires: 500, FirstEpisode: now.Add(-scan)}
+		if got := ObservedWindow(s, r, scan, now); got != scan {
+			t.Errorf("observed window = %v, want the full %v", got, scan)
+		}
+	})
+
+	t.Run("never exceeds the scan window", func(t *testing.T) {
+		r := store.Rule{FirstSeen: now.Add(-365 * 24 * time.Hour)}
+		s := Signals{Fires: 500, FirstEpisode: now.Add(-scan)}
+		if got := ObservedWindow(s, r, scan, now); got != scan {
+			t.Errorf("observed window = %v, want it capped at the scan window %v", got, scan)
+		}
+	})
+
+	t.Run("unknown age falls back to the scan window", func(t *testing.T) {
+		if got := ObservedWindow(Signals{}, store.Rule{}, scan, now); got != scan {
+			t.Errorf("observed window = %v, want %v", got, scan)
+		}
+	})
+
+	t.Run("a future FirstSeen claims nothing", func(t *testing.T) {
+		r := store.Rule{FirstSeen: now.Add(time.Hour)}
+		if got := ObservedWindow(Signals{}, r, scan, now); got != 0 {
+			t.Errorf("observed window = %v, want 0 under clock skew", got)
+		}
+	})
+}
+
+// TestEvaluateGatesANewlyAddedRule is the scenario from the bug report, end to
+// end: a rule added yesterday, fired 12 times while someone tuned it, must not
+// come back with a confident verdict.
+func TestEvaluateGatesANewlyAddedRule(t *testing.T) {
+	cfg := config.Default()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	r := store.Rule{FirstSeen: now.Add(-24 * time.Hour)}
+	s := Signals{
+		Fires: 12, UniqueFingerprints: 1,
+		ShortLivedRate: 1, SilencedRate: 1,
+		FirstEpisode: now.Add(-23 * time.Hour),
+	}
+
+	_, conf, verdict := Evaluate(s, r, 30*24*time.Hour, now, cfg)
+	if conf >= minConfidence {
+		t.Errorf("confidence = %.2f for a rule one day old, want below %.2f",
+			conf, minConfidence)
+	}
+	if verdict != VerdictKeep {
+		t.Errorf("verdict = %q, want %q; a day-old rule has not earned one",
+			verdict, VerdictKeep)
+	}
 }

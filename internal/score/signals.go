@@ -54,6 +54,13 @@ type Signals struct {
 	P50Duration        time.Duration
 	P90Duration        time.Duration
 
+	// FirstEpisode is when this rule's earliest firing episode in the window
+	// started, or zero if it never fired. It is a confidence-only input, not a
+	// scored signal: it bounds how long the rule has demonstrably existed, so a
+	// rule added yesterday cannot claim a month of observation. It is
+	// deliberately absent from Map, which stores the scored signals.
+	FirstEpisode time.Time
+
 	ShortLivedRate float64
 	FlapRate       float64
 	SilencedRate   float64
@@ -121,6 +128,10 @@ func Compute(in Input) Signals {
 	threshold := shortLivedThreshold(in.Rule)
 
 	for _, e := range firing {
+		if s.FirstEpisode.IsZero() || e.StartedAt.Before(s.FirstEpisode) {
+			s.FirstEpisode = e.StartedAt
+		}
+
 		d := e.Duration()
 		durations = append(durations, d)
 		byFingerprint[e.Fingerprint] = append(byFingerprint[e.Fingerprint], e)

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
 const (
@@ -68,6 +69,41 @@ func NoiseScore(s Signals, w config.Weights) float64 {
 	return math.Max(0, math.Min(100, 100*weighted))
 }
 
+// ObservedWindow is how long this rule has demonstrably been observable,
+// bounded by the scan window. It is what confidence is measured against.
+//
+// Rule.FirstSeen is when noisefloor first met the rule, which on a first scan
+// is `now` for every rule -- using it alone would zero every confidence on the
+// first run and destroy the point of reconstructing history from ALERTS. The
+// rule's earliest episode is the other half of the evidence: a rule met today
+// whose episodes reach back a month demonstrably existed a month ago.
+//
+// So the clock starts at the earlier of the two. A genuinely new rule has both
+// close to now and is correctly gated to a short window; an old rule seen for
+// the first time keeps the full one.
+func ObservedWindow(s Signals, r store.Rule, scanWindow time.Duration, now time.Time) time.Duration {
+	start := r.FirstSeen
+	if !s.FirstEpisode.IsZero() && (start.IsZero() || s.FirstEpisode.Before(start)) {
+		start = s.FirstEpisode
+	}
+	if start.IsZero() {
+		// Nothing known about the rule's age. The scan window is the only
+		// honest bound available.
+		return scanWindow
+	}
+
+	age := now.Sub(start)
+	switch {
+	case age < 0:
+		// A clock skew, or a rule first seen in the future. Claim nothing.
+		return 0
+	case age < scanWindow:
+		return age
+	default:
+		return scanWindow
+	}
+}
+
 // Confidence reports how much the evidence is worth, independent of how bad it
 // looks. It is the weaker of two sufficiency measures: enough episodes, and
 // enough observed time.
@@ -89,7 +125,15 @@ func Confidence(s Signals, window time.Duration, c config.Confidence) float64 {
 // Order matters. A flapping or concentrated rule is a threshold problem, so it
 // is tuned rather than retired even when its noise score is high: deleting a
 // rule that only needs a longer for: destroys real coverage.
-func Verdict(s Signals, noise, confidence float64) string {
+func Verdict(s Signals, noise, confidence float64, c config.Confidence) string {
+	// min_episodes is a floor the user configured, and it must mean what it
+	// says. Confidence is min(fires/min_episodes, window/min_window) against a
+	// gate of 0.5, so relying on the ratio alone let `min_episodes: 10` hand
+	// out a retire at 5 fires -- half the number the operator wrote down.
+	// Compare the count directly as well.
+	if s.Fires < c.MinEpisodes {
+		return VerdictKeep
+	}
 	if confidence < minConfidence {
 		return VerdictKeep
 	}
@@ -122,9 +166,14 @@ func Verdict(s Signals, noise, confidence float64) string {
 }
 
 // Evaluate is the one call the rest of the program needs.
-func Evaluate(s Signals, window time.Duration, cfg config.Config) (noise, confidence float64, verdict string) {
+//
+// It takes the rule and `now` so the confidence window is bounded by the
+// rule's own age here rather than at every call site, where it would
+// eventually be forgotten. scanWindow is the span of history actually
+// observed, which is not necessarily the span requested.
+func Evaluate(s Signals, r store.Rule, scanWindow time.Duration, now time.Time, cfg config.Config) (noise, confidence float64, verdict string) {
 	noise = NoiseScore(s, cfg.Weights)
-	confidence = Confidence(s, window, cfg.Confidence)
-	verdict = Verdict(s, noise, confidence)
+	confidence = Confidence(s, ObservedWindow(s, r, scanWindow, now), cfg.Confidence)
+	verdict = Verdict(s, noise, confidence, cfg.Confidence)
 	return noise, confidence, verdict
 }

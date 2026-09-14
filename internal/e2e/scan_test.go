@@ -122,7 +122,7 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 			Rule: r, Episodes: eps, AllEpisodes: all,
 			Silences: silences, Location: time.UTC,
 		})
-		_, _, v := score.Evaluate(s, window, cfg)
+		_, _, v := score.Evaluate(s, r, window, now, cfg)
 		verdicts[r.AlertName] = v
 		signals[r.AlertName] = s
 	}
