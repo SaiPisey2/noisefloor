@@ -25,10 +25,12 @@ func metrics(w http.ResponseWriter, _ *http.Request) {
 	// and the demo then fails to demonstrate the thing it exists to show.
 	// These periods must stay in step with demo/seed/main.go.
 
-	// Spiky: 2m firing every 90m. Short-lived, and far enough apart that it
-	// does not read as flapping.
+	// Spiky: 3m firing every 90m. Short-lived, and far enough apart that it
+	// does not read as flapping. 3m not 2m because a 120s window yields
+	// exactly two samples with zero margin at a 1m step, and the 15s
+	// evaluation grid can shave up to 15s off each edge.
 	spiky := 0.0
-	if math.Mod(t, 5400) < 120 {
+	if math.Mod(t, 5400) < 180 {
 		spiky = 1
 	}
 
@@ -48,8 +50,11 @@ func metrics(w http.ResponseWriter, _ *http.Request) {
 	// Cause A-D: four components that always breach together, which is what
 	// cause-based alerting looks like from the outside. Four, not three,
 	// because co-fire detection requires three OTHER rules firing alongside.
+	// 3m not 2m for the same sampling-margin reason as spiky: a 120s window
+	// yields exactly two samples with zero margin at a 1m step, and the 15s
+	// evaluation grid can shave up to 15s off each edge.
 	cause := 0.0
-	if math.Mod(t, 600) < 120 {
+	if math.Mod(t, 600) < 180 {
 		cause = 1
 	}
 

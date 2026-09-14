@@ -6,8 +6,13 @@ build:
 test:
 	go test ./...
 
+# Build and start are separate on purpose. `up -d --build` has been observed
+# hanging with containers stuck in Created; building first makes the failure
+# visible at the build step instead of as an indefinite hang.
 demo-up:
-	docker-compose -f demo/docker-compose.yml up -d --build
+	docker-compose -f demo/docker-compose.yml build
+	docker-compose -f demo/docker-compose.yml up -d
+	docker-compose -f demo/docker-compose.yml ps
 	@echo "prometheus   http://localhost:9090"
 	@echo "alertmanager http://localhost:9093"
 
