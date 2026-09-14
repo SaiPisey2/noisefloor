@@ -124,6 +124,21 @@ func LocateRules(root string) ([]RuleLocation, []FileError, error) {
 	return locs, fileErrs, nil
 }
 
+// LocationsByKey indexes a set of locations by RuleKey, the same way
+// LinesByKey does for just the starting line. internal/scanner and
+// internal/pr use this to attach a rule's full location (file, line span,
+// for:/expr: field positions) to its score, which a remediation PR needs to
+// edit the right lines. Same last-one-wins tie-break as LinesByKey, for the
+// same reason: it mirrors AmbiguousNames, a property of the rule set rather
+// than something this package resolves.
+func LocationsByKey(locs []RuleLocation) map[RuleKey]RuleLocation {
+	out := make(map[RuleKey]RuleLocation, len(locs))
+	for _, l := range locs {
+		out[l.Key] = l
+	}
+	return out
+}
+
 // LinesByKey indexes a set of locations by RuleKey for populating
 // store.Rule.Line. A rule is expected to occupy at most one file in a
 // correctly laid-out checkout; if two files define the same (group,

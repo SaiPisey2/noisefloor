@@ -15,6 +15,13 @@ const (
 	VerdictKeep     = "keep"
 )
 
+// MinConfidence is minConfidence, exported so a caller that already has a
+// rule's Confidence (internal/scanner, internal/pr) can tell "verdict is
+// keep because confidence is below the floor" apart from "verdict is keep
+// because the rule is simply fine" -- Verdict itself collapses both into the
+// same string, which a remediation refusal needs to distinguish.
+const MinConfidence = minConfidence
+
 const (
 	// minConfidence is the floor below which no verdict other than keep is
 	// allowed. Proposing changes on thin evidence is how a tool loses trust.

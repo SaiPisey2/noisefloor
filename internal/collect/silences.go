@@ -137,6 +137,36 @@ func SilenceMatches(s store.Silence, alertName string, labels map[string]string)
 	return len(s.Matchers) > 0
 }
 
+// CoveringSilences returns every silence that matches alertName against at
+// least one of eps' label sets and overlaps at least one of their
+// [StartedAt,EndedAt) spans, deduplicated by AMID and sorted by StartsAt.
+//
+// This is "who silenced this and when" for a retire proposal's evidence
+// table: SilencedSeconds already answers HOW MUCH of a rule's firing time
+// was covered, but a reviewer checking that claim needs the silences
+// themselves, not just the fraction.
+func CoveringSilences(alertName string, eps []store.Episode, sils []store.Silence) []store.Silence {
+	seen := map[string]bool{}
+	var out []store.Silence
+	for _, s := range sils {
+		if seen[s.AMID] {
+			continue
+		}
+		for _, e := range eps {
+			if !SilenceMatches(s, alertName, e.Labels) {
+				continue
+			}
+			if s.StartsAt.Before(e.EndedAt) && s.EndsAt.After(e.StartedAt) {
+				out = append(out, s)
+				seen[s.AMID] = true
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	return out
+}
+
 // SilencedSeconds returns how much of an episode was covered by matching
 // silences. Overlapping silences are unioned, never summed, so coverage can
 // never exceed the episode.
