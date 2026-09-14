@@ -170,3 +170,38 @@ func TestRenderTruncatedWindowUsesMinutePrecisionAndFractionalDays(t *testing.T)
 		t.Errorf("truncated window must show a fractional day count, got:\n%s", out)
 	}
 }
+
+// TestRenderStatesAmbiguousNames pins the header line. Ambiguous rules are
+// skipped entirely, so without this the report silently omits rules the user
+// can see in Prometheus.
+func TestRenderStatesAmbiguousNames(t *testing.T) {
+	meta := testMeta()
+	meta.Ambiguous = 2
+
+	var sb strings.Builder
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "Ambiguous  2 alert names defined in more than one group (not scored)") {
+		t.Errorf("ambiguous names must be stated in the header, got:\n%s", out)
+	}
+
+	meta.Ambiguous = 1
+	sb.Reset()
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(sb.String(), "1 alert name defined") {
+		t.Errorf("singular case must read naturally, got:\n%s", sb.String())
+	}
+
+	meta.Ambiguous = 0
+	sb.Reset()
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(sb.String(), "Ambiguous") {
+		t.Errorf("no ambiguous names must print no line, got:\n%s", sb.String())
+	}
+}

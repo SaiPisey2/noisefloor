@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
@@ -23,6 +24,19 @@ var _ RuleStore = (*store.SQLite)(nil)
 type RuleSyncResult struct {
 	Active      int
 	Deactivated int
+
+	// AmbiguousNames are alert names defined by more than one rule group,
+	// sorted. Two groups defining the same name is ordinary in real repos --
+	// prod and staging rule files, a mixin vendored twice -- and it is fatal to
+	// attribution: the ALERTS series carries an alertname but no group, so
+	// every episode of both rules resolves to whichever row the lookup returns
+	// first. The other rule then has no episodes and is skipped, and the
+	// survivor is scored on a history that is partly someone else's, using its
+	// own for: to judge the other rule's episodes.
+	//
+	// There is no way to disambiguate after the fact; the series genuinely
+	// lacks the information. Refusing to score them is the honest answer.
+	AmbiguousNames []string
 }
 
 // ExprHash identifies a rule's expression. A retuned rule gets a new hash,
@@ -56,6 +70,21 @@ func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now t
 
 	var res RuleSyncResult
 	keep := make([]int64, 0, len(groups))
+
+	// Count names across every group before upserting anything: a duplicate is
+	// a property of the rule set as a whole, not of any one group.
+	nameCount := map[string]int{}
+	for _, g := range groups {
+		for _, r := range g.Alerting {
+			nameCount[r.Name]++
+		}
+	}
+	for name, n := range nameCount {
+		if n > 1 {
+			res.AmbiguousNames = append(res.AmbiguousNames, name)
+		}
+	}
+	sort.Strings(res.AmbiguousNames)
 
 	for _, g := range groups {
 		for _, r := range g.Alerting {

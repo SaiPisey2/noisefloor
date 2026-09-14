@@ -35,6 +35,12 @@ type Meta struct {
 	// the score -- the report must say so rather than print "Silences 0", which
 	// is indistinguishable from "no silences exist".
 	SilencesAvailable bool
+
+	// Ambiguous counts alert names defined in more than one rule group. Their
+	// episodes cannot be attributed to a group, so they are not scored at all
+	// and do not appear in the table. Their absence has to be stated, or the
+	// report silently omits rules the user can see in Prometheus.
+	Ambiguous int
 }
 
 func Render(w io.Writer, rows []Row, meta Meta) error {
@@ -53,6 +59,10 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 			meta.WindowEnd.Format("2006-01-02"), days)
 	}
 	fmt.Fprintf(w, "Rules      %d active, %d inactive\n", meta.RulesActive, meta.RulesInactive)
+	if meta.Ambiguous > 0 {
+		fmt.Fprintf(w, "Ambiguous  %d alert %s defined in more than one group (not scored)\n",
+			meta.Ambiguous, plural(meta.Ambiguous, "name", "names"))
+	}
 	fmt.Fprintf(w, "Episodes   %d\n", meta.Episodes)
 	// Three distinct states, and conflating them misreports the score. When
 	// Alertmanager is unreachable the store may still hold silences observed by
@@ -107,6 +117,13 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 		)
 	}
 	return tw.Flush()
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // pct renders a rate. Signals are guarded at their source, but this is the

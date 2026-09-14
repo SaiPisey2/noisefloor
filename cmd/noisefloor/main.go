@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect"
@@ -141,6 +142,26 @@ func runScan(args []string) error {
 		return err
 	}
 
+	// An alert name defined by two groups cannot be attributed: the ALERTS
+	// series carries an alertname and no group, so both rules' episodes land on
+	// whichever row the lookup returns, the other rule is silently skipped for
+	// having none, and the survivor is judged -- with its own for: -- on a
+	// history that is partly someone else's. That produces a confident retire
+	// justified by a different rule. Refuse to score them and say so.
+	ambiguous := map[string]bool{}
+	if len(ruleSync.AmbiguousNames) > 0 {
+		for _, n := range ruleSync.AmbiguousNames {
+			ambiguous[n] = true
+		}
+		fmt.Fprintf(os.Stderr,
+			"warning: %d alert name(s) defined in more than one rule group: %s\n"+
+				"         the ALERTS series records no group, so their episodes cannot be\n"+
+				"         attributed to one rule; they will NOT be scored. Rename them or\n"+
+				"         remove the duplicate definition.\n",
+			len(ruleSync.AmbiguousNames),
+			strings.Join(ruleSync.AmbiguousNames, ", "))
+	}
+
 	backfill, err := collect.New(api, db, cfg).Run(ctx, now.Add(-cfg.Window.Std()), now)
 	if err != nil {
 		return err
@@ -207,6 +228,9 @@ func runScan(args []string) error {
 		if !r.Active {
 			continue
 		}
+		if ambiguous[r.AlertName] {
+			continue
+		}
 		eps := byRule[r.ID]
 		if len(eps) == 0 {
 			continue
@@ -258,5 +282,6 @@ func runScan(args []string) error {
 		Episodes:          backfill.Episodes,
 		Silences:          len(silences),
 		SilencesAvailable: silencesAvailable,
+		Ambiguous:         len(ruleSync.AmbiguousNames),
 	})
 }

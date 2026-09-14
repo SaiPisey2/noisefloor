@@ -108,7 +108,7 @@ func TestSyncRulesDeactivatesMissingRules(t *testing.T) {
 	staleID, _ := db.UpsertRule(ctx, stale)
 
 	groups := []prom.RuleGroup{{
-		Name: "demo",
+		Name:     "demo",
 		Alerting: []prom.AlertingRule{{Name: "Alive", Query: "up == 0"}},
 	}}
 
@@ -271,5 +271,67 @@ func TestSyncRulesWithRealStoreAvoidsFalseRetuneOnFirstScan(t *testing.T) {
 	}
 	if !RetunedDuring(rules[0], now) {
 		t.Error("third scan: rule with changed expression SHOULD be retuned")
+	}
+}
+
+// TestSyncRulesReportsDuplicateAlertNames pins the ambiguity detection. Two
+// groups defining one alert name is ordinary -- prod and staging rule files, a
+// mixin vendored twice -- and it is fatal to attribution, because the ALERTS
+// series carries no group. SyncRules must name them so the scan can refuse to
+// score them rather than pile both histories onto one rule.
+func TestSyncRulesReportsDuplicateAlertNames(t *testing.T) {
+	ctx := context.Background()
+	db := newRuleStore()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	groups := []prom.RuleGroup{
+		{Name: "prod", File: "prod.yml", Alerting: []prom.AlertingRule{
+			{Name: "Dup", Query: "up == 0"},
+			{Name: "AlsoDup", Query: "up == 0"},
+			{Name: "Unique", Query: "up == 0"},
+		}},
+		{Name: "staging", File: "staging.yml", Alerting: []prom.AlertingRule{
+			{Name: "Dup", Query: "up == 0"},
+			{Name: "AlsoDup", Query: "up == 0"},
+		}},
+	}
+
+	res, err := SyncRules(ctx, groups, db, now)
+	if err != nil {
+		t.Fatalf("SyncRules: %v", err)
+	}
+	want := []string{"AlsoDup", "Dup"} // sorted, for a deterministic warning
+	if len(res.AmbiguousNames) != len(want) {
+		t.Fatalf("AmbiguousNames = %v, want %v", res.AmbiguousNames, want)
+	}
+	for i, n := range want {
+		if res.AmbiguousNames[i] != n {
+			t.Errorf("AmbiguousNames[%d] = %q, want %q (sorted)", i, res.AmbiguousNames[i], n)
+		}
+	}
+
+	// Both definitions are still stored and active. They are not scored, but
+	// deactivating them would be a lie: Prometheus really is evaluating both.
+	if res.Active != 5 {
+		t.Errorf("Active = %d, want 5; ambiguity must not drop rules from the sync", res.Active)
+	}
+}
+
+func TestSyncRulesReportsNoAmbiguityForDistinctNames(t *testing.T) {
+	ctx := context.Background()
+	db := newRuleStore()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	groups := []prom.RuleGroup{
+		{Name: "a", File: "a.yml", Alerting: []prom.AlertingRule{{Name: "One", Query: "up == 0"}}},
+		{Name: "b", File: "b.yml", Alerting: []prom.AlertingRule{{Name: "Two", Query: "up == 0"}}},
+	}
+
+	res, err := SyncRules(ctx, groups, db, now)
+	if err != nil {
+		t.Fatalf("SyncRules: %v", err)
+	}
+	if len(res.AmbiguousNames) != 0 {
+		t.Errorf("AmbiguousNames = %v, want none", res.AmbiguousNames)
 	}
 }
