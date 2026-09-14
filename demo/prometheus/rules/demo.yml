@@ -5,18 +5,19 @@ groups:
   - name: demo
     interval: 15s
     rules:
-      # Fires for 3m-6m every 97m (94m+ off) and resolves itself. Nobody acts
-      # on it. Expected verdict: retire when a silence covers the window (see
-      # internal/e2e/scan_test.go); on a plain scan with no silences it reads
-      # `keep` -- the jitter added to this waveform (demo/seed, demo/faultgen)
-      # dropped its noise score just under the retire threshold, which it was
-      # calibrated one point above. See demo/seed/main.go's DemoSpiky comment.
+      # Fires for 3m or 4m every 97m (94m+ off) and resolves itself. Nobody
+      # acts on it. Expected verdict: retire -- on a plain scan with no
+      # silences this clears the threshold on short_lived_rate alone (with
+      # no margin to spare: see demo/seed/main.go's DemoSpiky comment), and
+      # internal/e2e/scan_test.go's injected historical silence pushes it
+      # further over via silenced_rate too.
       - alert: DemoSpiky
         expr: demo_spiky_gauge > 0
         labels: {severity: warning}
         annotations: {summary: "Spiky signal breached"}
 
-      # 4m on, 7m off: short episodes that keep coming back.
+      # 3m or 4m on 90% of the time, 15m-17m on the other 10%; off long
+      # enough either way for the episode to resolve before the next one.
       # Expected verdict: tune.
       - alert: DemoFlapping
         expr: demo_flapping_gauge > 0

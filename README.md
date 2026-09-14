@@ -34,36 +34,34 @@ This is real output from the demo stack (`make demo-up && make demo-seed`),
 ```
 Window     2026-08-15 to 2026-09-14  (30d)
 Rules      8 active, 0 inactive
-Episodes   6720
+Episodes   4337
 Silences   0
 
 NOISE  CONF  VERDICT   GROUP  RULE           FIRES  P50  SHORT  SILENCED  FLAP  COFIRE  CONC  CHURN  NIGHT
-45     0.8   retire    demo   DemoCauseA     598    3m   100%   0%        0%    100%    0%    0%     3%
-45     0.8   retire    demo   DemoCauseB     598    3m   100%   0%        0%    100%    0%    0%     3%
-45     0.8   retire    demo   DemoCauseC     598    3m   100%   0%        0%    100%    0%    0%     3%
-45     0.8   retire    demo   DemoCauseD     598    3m   100%   0%        0%    100%    0%    0%     3%
-22     0.8   keep      demo   DemoSpiky      438    4m   69%    0%        0%    7%      0%    0%     3%
-21     0.8   tune      demo   DemoFlapping   3859   5m   0%     0%        100%  7%      0%    0%     0%
-3      0.8   automate  demo   DemoSustained  29     1h   0%     0%        0%    7%      0%    0%     23%
+49     0.8   tune      demo   DemoFlapping   1436   4m   91%    0%        100%  7%      0%    0%     2%
+45     0.8   retire    demo   DemoCauseA     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   retire    demo   DemoCauseB     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   retire    demo   DemoCauseC     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   retire    demo   DemoCauseD     607    3m   100%   0%        0%    100%    0%    0%     5%
+31     0.8   retire    demo   DemoSpiky      444    4m   100%   0%        0%    7%      0%    0%     2%
+4      0.8   automate  demo   DemoSustained  28     1h   0%     0%        0%    7%      0%    0%     33%
 ```
 
 This is the output of `make demo-up && make demo-seed && noisefloor scan`;
 exact counts shift slightly between runs as the seeded window slides, and
-per-episode durations now carry deliberate jitter (see Limits) so the exact
-NOISE/SHORT numbers above will not reproduce bit-for-bit either.
+per-episode durations now carry deliberate, bimodal jitter (see Limits) so
+the exact NOISE numbers above will not reproduce bit-for-bit either.
 
 `DemoFlapping` re-fires constantly on the same series (`tune`) -- its
 `for:` counterfactual is demonstrated below, in Remediation. `DemoCauseA`
 through `DemoCauseD` always fire together, alongside whatever they are a
 symptom of (`retire`, high cofire). `DemoSpiky` resolves itself before
-anyone could act, but on a plain scan with no silences its noise score
-(calibrated one point above the retire threshold, before jitter) now lands
-just under it, so it reads `keep` here; add a silence covering the window
-(as the e2e test does) and it reaches `retire` on that evidence instead --
-see the jitter comment in `demo/seed/main.go`. `DemoSustained` fires rarely
-but for real, sustained periods, and stays `automate` -- never `retire` --
-because it is the one rule in the set worth a runbook, not a deletion.
-`DemoQuiet` never fires and does not appear at all.
+anyone could act (`retire`, on short_lived_rate alone -- no silence
+required, though the e2e test adds one anyway to exercise that path too).
+`DemoSustained` fires rarely but for real, sustained periods, and stays
+`automate` -- never `retire` -- because it is the one rule in the set worth
+a runbook, not a deletion. `DemoQuiet` never fires and does not appear at
+all.
 
 NIGHT reads at or near zero for every demo rule because the seeded fires are
 spread evenly around the clock. That is the correct answer: the column
@@ -261,10 +259,11 @@ Two shapes of proposal:
   check the claim against their own Prometheus, stated as a query to run
   and a count to expect, not just asserted.
 - **tune** -- raises `for:`. The PR body states the counterfactual
-  explicitly: *"p90 episode is 6m, current `for: 30s`; `for: 6m30s` would
-  have suppressed 73% of past fires..."* -- a specific, checkable claim
-  about what the proposed value would have done to the rule's own history
-  (see `internal/remediate`'s counterfactual code).
+  explicitly: *"p90 episode is 4m, current `for: 30s`; `for: 4m30s` would
+  have suppressed 46% of past fires and retained 128 of 128 episodes longer
+  than 9m."* -- a specific, checkable claim about what the proposed value
+  would have done to the rule's own history (see `internal/remediate`'s
+  counterfactual code).
 
 Every diff is minimal and surgical: a retire deletes exactly the rule's own
 lines (nothing reformatted, reordered, or stripped elsewhere in the file);
@@ -300,13 +299,18 @@ new type behind that same interface, not a restructuring.
 
 ## Limits
 
-- The demo waveforms (`demo/seed`, `demo/faultgen`) carry deterministic
-  jitter on `DemoSpiky` and `DemoFlapping`'s on-periods, seeded from the
-  cycle index so re-seeding reproduces byte-identically. Real alerts do
-  not fire for exactly the same duration every time, and a fixed duration
-  made the `tune` counterfactual above demonstrate nothing -- every
-  candidate `for:` landed exactly on the retain/suppress boundary and
-  suppressed 0%.
+- The demo waveforms (`demo/seed`, `demo/faultgen`) carry deterministic,
+  bimodal jitter on `DemoSpiky` and `DemoFlapping`'s on-periods -- most
+  episodes short (3m or 4m), `DemoFlapping` additionally drawing a long
+  episode (15m-17m) about 1 cycle in 10 -- seeded from the cycle index so
+  re-seeding reproduces byte-identically. Real alerts do not fire for
+  exactly the same duration every time, and a fixed duration made the
+  `tune` counterfactual above demonstrate nothing -- every candidate `for:`
+  landed exactly on the retain/suppress boundary and suppressed 0%. The
+  long band exists so that counterfactual has something real to retain,
+  not just suppress; `DemoSpiky` has no long band, since its noise score
+  is calibrated with only one point of margin above the retire threshold
+  and any real fraction of long episodes would cost it that verdict.
 - Episode precision is bounded by the query step; alerts shorter than one step
   are undercounted.
 - The scan window ends on a `prometheus.step` boundary, so it can lag the

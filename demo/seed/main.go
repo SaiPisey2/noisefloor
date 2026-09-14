@@ -25,25 +25,46 @@ type scenario struct {
 	firing func(t float64) bool
 }
 
-// Cycle periods and base on-durations for the two jittered scenarios
-// (DemoSpiky, DemoFlapping). Kept as named constants, not literals, because
-// jitterSeconds and onPeriodFiring below both need them and demo/faultgen
-// must use the identical numbers.
+// Cycle periods for the two jittered scenarios (DemoSpiky, DemoFlapping).
+// Named constants, not literals, because bimodalOn and onPeriodFiring below
+// both need them and demo/faultgen must use the identical numbers.
+//
+// flappingPeriod is 1800s, not the 660s an unjittered 4m-on/7m-off wave
+// would use: its long band (below) needs room to sit comfortably above
+// 2x the candidate for: DefaultLongThreshold demands, while its own
+// off-period still has to stay inside the 1h flap window. 660s has no room
+// for that; 1800s does, with margin either side (see the per-scenario
+// comments below).
 const (
 	spikyPeriod    = 5820.0
-	spikyBaseOn    = 180.0
-	spikyMaxJitter = 180.0 // on-period spreads 3m-6m; off-period never drops below 5460s
+	flappingPeriod = 1800.0
 
-	flappingPeriod    = 660.0
-	flappingBaseOn    = 240.0
-	flappingMaxJitter = 150.0 // on-period spreads 4m-6.5m; off-period never drops below 270s
-
-	// Distinct salts keep DemoSpiky's and DemoFlapping's jitter sequences
+	// Distinct salts keep DemoSpiky's and DemoFlapping's cycle draws
 	// independent even though both are indexed by an integer cycle count
 	// that happens to overlap between the two waveforms.
 	spikySalt    = 0x5350494B59 // "SPIKY" read as bytes, just a fixed constant
 	flappingSalt = 0x464C415050 // "FLAPP"
 )
+
+// shortOn is the on-period (in seconds) both DemoSpiky and DemoFlapping draw
+// their "ordinary" episodes from: 3m or 4m, chosen per cycle. Both values
+// sit well under the 5m short-lived floor score/signals.go falls back to
+// whenever 3x a rule's for: doesn't reach it -- true for DemoSpiky (no
+// for:) and for DemoFlapping (for: 30s, 3x30s=90s < the floor) alike -- so
+// every ordinary episode from either rule reads as short-lived regardless
+// of which of the two values a given cycle drew.
+var shortOn = []float64{180, 240}
+
+// flappingLongOn is DemoFlapping's long band: a minority of its episodes
+// run genuinely long (15m-17m), which is what gives its tune counterfactual
+// something real to retain -- see flappingLongProb and the scenario comment
+// below for the arithmetic this range was chosen against.
+var flappingLongOn = []float64{900, 960, 1020}
+
+// flappingLongProb is the fraction of DemoFlapping's cycles drawn from
+// flappingLongOn rather than shortOn: roughly 1 in 10, the "mostly short,
+// occasional long" shape real alert durations take.
+const flappingLongProb = 0.10
 
 // splitmix64 is a small, well-distributed, deterministic integer hash. It
 // exists here only to turn a cycle index into a uniform pseudo-random
@@ -56,32 +77,56 @@ func splitmix64(x uint64) uint64 {
 	return x
 }
 
-// jitterSeconds returns a deterministic, right-skewed jitter amount in
-// [0, max), seeded from the cycle index (and a per-waveform salt) alone --
-// never from wall-clock time or any other source that would make a re-seed
-// produce different history. The same index always produces the same
-// jitter, in both demo/seed (writing history) and demo/faultgen (emitting
-// it live), which is what keeps the two waveforms in step.
-//
-// u^3 with u uniform on [0,1) is the skew: most cycles land near the short
-// end (median jitter is ~1/8 of max) with a tail reaching toward the full
-// max, which is the shape real alert durations take -- mostly short,
-// occasionally much longer -- rather than the single fixed duration this
-// waveform used to produce every cycle.
-func jitterSeconds(index int, salt uint64, max float64) float64 {
+// hashUnit returns a deterministic uniform value in [0,1) from a cycle
+// index and a salt -- never from wall-clock time or any other source that
+// would make a re-seed produce different history. The same (index, salt)
+// always produces the same value, in both demo/seed (writing history) and
+// demo/faultgen (emitting it live), which is what keeps the two waveforms
+// in step.
+func hashUnit(index int, salt uint64) float64 {
 	h := splitmix64(uint64(int64(index))*2 + salt)
-	u := float64(h%1_000_000) / 1_000_000.0
-	return u * u * u * max
+	return float64(h%1_000_000) / 1_000_000.0
+}
+
+// bimodalOn picks the on-period duration for one cycle: with probability
+// longProb (0 disables the long band entirely -- DemoSpiky has none) it
+// draws uniformly from longValues, otherwise uniformly from shortValues.
+// The branch and the in-band pick are separately salted (salt^1 vs salt)
+// so they are not the same draw.
+//
+// Discrete VALUES, not a continuous jittered range quantized after the
+// fact: an earlier version of this fixture jittered continuously and let
+// the collector's step-aligned sampling quantize the result, which sounds
+// equivalent but is not. A continuous range narrower than one sample step
+// quantizes to a SINGLE value for nearly every draw (only an exact
+// zero-jitter draw lands in the lower bucket), which silently produced one
+// fixed duration again -- the exact defect jitter exists to fix, just
+// relocated. Choosing from a small, explicit set of values the collector
+// reproduces exactly sidesteps that trap: each value's classification
+// (short or long, above or below a threshold) is a property of this
+// fixture's own design, not an accident of where a continuous range
+// happens to straddle a 60-second sampling grid.
+func bimodalOn(index int, salt uint64, shortValues, longValues []float64, longProb float64) float64 {
+	if longProb > 0 && hashUnit(index, salt^1) < longProb {
+		return pickValue(longValues, hashUnit(index, salt))
+	}
+	return pickValue(shortValues, hashUnit(index, salt))
+}
+
+func pickValue(values []float64, u float64) float64 {
+	i := int(u * float64(len(values)))
+	if i >= len(values) {
+		i = len(values) - 1
+	}
+	return values[i]
 }
 
 // onPeriodFiring reports whether t (seconds from window start) falls inside
-// a firing on-period of a cycle-jittered square wave: period-length cycles,
-// each with its own on-duration of baseOn+jitterSeconds(cycle index).
-// Jitter only ever ADDS to baseOn, so it can never violate the >=3-step
-// on-period floor that baseOn alone already satisfies.
-func onPeriodFiring(t, period, baseOn float64, salt uint64, maxJitter float64) bool {
+// a firing on-period of a cycle-bimodal square wave: period-length cycles,
+// each with its own on-duration drawn by bimodalOn from the cycle index.
+func onPeriodFiring(t, period float64, shortValues, longValues []float64, longProb float64, salt uint64) bool {
 	idx := int(t / period)
-	on := baseOn + jitterSeconds(idx, salt, maxJitter)
+	on := bimodalOn(idx, salt, shortValues, longValues, longProb)
 	return mod(t, period) < on
 }
 
@@ -92,16 +137,14 @@ func scenarios() []scenario {
 	//  2. off-period > the query lookback (1m, set on the demo Prometheus),
 	//     or the gap is invisible and the episodes merge into one.
 	//  3. where a rule must read flap_rate 0, off-period > the 1h flap window.
-	//  4. DemoSpiky and DemoFlapping additionally carry deterministic jitter
-	//     on their on-periods (see jitterSeconds/onPeriodFiring above). A
-	//     fixed on-period made every episode's stored duration identical, so
-	//     a P90-anchored counterfactual `for:` landed exactly on the
-	//     retain/suppress boundary and suppressed nothing -- real alerts do
-	//     not fire for precisely the same duration every time. Jitter is
-	//     seeded from the cycle index, not wall-clock time or any RNG state,
-	//     so a re-seed reproduces byte-identically. Both jitter ranges stay
-	//     well inside constraints 2 and 3 even at maximum jitter (see the
-	//     per-constant comments above).
+	//  4. DemoSpiky and DemoFlapping additionally draw a deterministic,
+	//     bimodal on-period per cycle (see bimodalOn/onPeriodFiring above)
+	//     instead of a single fixed one -- real alerts do not fire for
+	//     precisely the same duration every time, and a fixed duration made
+	//     a P90-anchored counterfactual `for:` land exactly on the
+	//     retain/suppress boundary and suppress nothing. The draw is seeded
+	//     from the cycle index alone, so a re-seed reproduces
+	//     byte-identically.
 	//
 	// The periods are also deliberately NOT harmonically related. An earlier
 	// set had DemoSpiky at 5400s and the cause rules at 600s -- 5400 being an
@@ -117,34 +160,44 @@ func scenarios() []scenario {
 	// with a flap rate of zero. Keep these in step with demo/faultgen.
 	return []scenario{
 		{
-			// ~3m-6m firing every 97m (never less than ~94m off): short-lived,
-			// and far enough apart -- past the 1h flap window even at maximum
-			// jitter -- that it does not register as flapping.
-			//
-			// Before jitter, every episode was exactly 3m and short_lived_rate
-			// alone (worth 0.30 of noise) put this rule's noise score at 31,
-			// one point above the retire threshold of 30 -- calibrated with no
-			// margin to spare. Jitter now pushes roughly a third of episodes to
-			// 5m/6m (still short-lived by any human standard, but over the
-			// fixed 5m short_lived floor score/signals.go uses when a rule has
-			// no `for:`), which drops short_lived_rate enough to fall under the
-			// threshold: DemoSpiky verdicts `keep` on a plain scan with no
-			// silences. See internal/e2e/scan_test.go, which seeds a
-			// historical silence covering the whole window for exactly this
-			// rule and reaches `retire` through silenced_rate instead -- that
-			// margin was always doing real work, jitter just made it visible.
+			// 3m or 4m firing every 97m (never less than ~94m off): always
+			// short-lived (see shortOn's comment), and far enough apart --
+			// past the 1h flap window -- that it does not register as
+			// flapping. No long band: DemoSpiky's noise score is calibrated
+			// only one point above the retire threshold (short_lived_rate
+			// alone is worth 0.30 of it), so a rule with any real fraction
+			// of long episodes falls under the threshold and stops reaching
+			// `retire` on self-resolution alone. See
+			// internal/e2e/scan_test.go, which seeds a historical silence
+			// covering the whole window for exactly this rule and reaches
+			// `retire` through silenced_rate as well as short_lived_rate --
+			// that silence is required, not merely a bonus, given how thin
+			// this rule's own margin is.
 			alertname: "DemoSpiky", severity: "warning",
 			firing: func(t float64) bool {
-				return onPeriodFiring(t, spikyPeriod, spikyBaseOn, spikySalt, spikyMaxJitter)
+				return onPeriodFiring(t, spikyPeriod, shortOn, nil, 0, spikySalt)
 			},
 		},
 		{
-			// ~4m-6m on, 5m-7m off: short episodes that keep coming back.
-			// Off-period exceeds the 1m query lookback but stays inside the
-			// 1h flap window, so it reads as flapping.
+			// 3m or 4m on (90% of cycles) or 15m-17m on (10%), each on
+			// followed by an off long enough for the episode to fully
+			// resolve first. Off-period exceeds the 1m query lookback but
+			// stays inside the 1h flap window in both cases, so it reads as
+			// flapping regardless of which band a given cycle drew.
+			//
+			// The long band exists so DemoFlapping's tune counterfactual has
+			// something real to retain: with for: 30s and P90 landing in the
+			// short band (~4m, since 90% of episodes sit there),
+			// SelectCandidateFor proposes for: ~4m30s and
+			// remediate.DefaultLongThreshold sets its "long enough to
+			// matter" bar at 2x that, ~9m -- comfortably below this band's
+			// 15m floor, so every long episode both survives the candidate
+			// for: and counts as long enough to report. See
+			// internal/pr's regenerated tune body for the resulting
+			// sentence.
 			alertname: "DemoFlapping", severity: "warning",
 			firing: func(t float64) bool {
-				return onPeriodFiring(t, flappingPeriod, flappingBaseOn, flappingSalt, flappingMaxJitter)
+				return onPeriodFiring(t, flappingPeriod, shortOn, flappingLongOn, flappingLongProb, flappingSalt)
 			},
 		},
 		{

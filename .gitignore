@@ -23,3 +23,6 @@ AGENTS.md
 # generated demo history
 demo/seed/alerts.openmetrics
 demo/seed/blocks/
+
+# build output of ./demo/seed
+/seed
