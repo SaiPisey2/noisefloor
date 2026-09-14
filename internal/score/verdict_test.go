@@ -166,6 +166,67 @@ func TestVerdictAutomatesDespiteConcentration(t *testing.T) {
 	}
 }
 
+// TestNoisyThresholdMatchesItsArchetypes re-derives the calibration in
+// verdict.go from the weights, rather than trusting the comment. If a weight
+// changes, or the offhours constant creeps back in, this fails with the
+// arithmetic on show.
+func TestNoisyThresholdMatchesItsArchetypes(t *testing.T) {
+	w := defaultWeights()
+	cases := []struct {
+		name string
+		s    Signals
+		want float64
+	}{
+		{"retire: self-resolving and silenced",
+			Signals{ShortLivedRate: 1, SilencedRate: 1}, 55},
+		{"flapping: short episodes that re-fire",
+			Signals{ShortLivedRate: 1, FlapRate: 1}, 50},
+		{"cause: fires alongside everything",
+			Signals{ShortLivedRate: 1, CofireRatio: 1}, 45},
+		{"pure self-resolver: nothing else wrong",
+			Signals{ShortLivedRate: 1}, 30},
+		{"healthy: long, rare, unsilenced",
+			Signals{ShortLivedRate: 0.05}, 1.5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NoiseScore(c.s, w)
+			if math.Abs(got-c.want) > 0.001 {
+				t.Errorf("noise = %.2f, want %.2f", got, c.want)
+			}
+		})
+	}
+}
+
+// TestPureSelfResolverIsExactlyActionable pins the reason noisyThreshold is
+// 30: short_lived_rate alone carries 0.30 of the weight, so a rule whose every
+// episode resolves before anyone could act scores exactly 30. That is the
+// floor at which the clearest single pathology counts on its own, without
+// needing a second one alongside it.
+func TestPureSelfResolverIsExactlyActionable(t *testing.T) {
+	s := confident(Signals{ShortLivedRate: 1, P50Duration: time.Minute})
+	noise := NoiseScore(s, defaultWeights())
+	if math.Abs(noise-float64(noisyThreshold)) > 0.001 {
+		t.Fatalf("a pure self-resolver scores %.2f, but noisyThreshold is %d; "+
+			"the threshold's stated rationale no longer holds",
+			noise, noisyThreshold)
+	}
+	if got := Verdict(s, noise, 1.0); got != VerdictRetire {
+		t.Errorf("verdict = %q, want %q", got, VerdictRetire)
+	}
+}
+
+// TestUniformlyFiringRuleGetsNoOffHoursPenalty is the whole point of
+// normalising the signal: a rule that fires round the clock used to collect
+// ~7.3 points for the shape of the calendar alone.
+func TestUniformlyFiringRuleGetsNoOffHoursPenalty(t *testing.T) {
+	s := confident(Signals{OffhoursRate: normaliseOffHours(offHoursBaseline)})
+	if got := NoiseScore(s, defaultWeights()); got != 0 {
+		t.Errorf("noise = %.2f, want 0; firing at the uniform rate must cost "+
+			"nothing", got)
+	}
+}
+
 func TestVerdictBoundariesAreInclusive(t *testing.T) {
 	// Every threshold below is documented as inclusive. Nothing else in the
 	// suite exercises the exact values, so flipping any >= to > would pass.

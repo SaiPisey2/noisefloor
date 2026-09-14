@@ -63,7 +63,13 @@ func Default() Config {
 		Database: "noisefloor.db",
 		Window:   Duration(30 * 24 * time.Hour),
 		Timeout:  Duration(10 * time.Minute),
-		Timezone: "Local",
+		// UTC, not Local. Timezone decides which fires count as off-hours, and
+		// off-hours is a scored signal: with "Local" the same database scored on
+		// a CET laptop and in a UTC CI container produces different noise scores
+		// and can produce different verdicts. A scan must be reproducible.
+		// Teams whose working day is not UTC set this explicitly, which is a
+		// deliberate, recorded choice rather than an accident of where it ran.
+		Timezone: "UTC",
 		Weights: Weights{
 			ShortLivedRate: 0.30,
 			SilencedRate:   0.25,

@@ -128,14 +128,45 @@ func TestSilencedRateAcrossMultipleEpisodesWithOverlappingSilences(t *testing.T)
 	closeTo(t, "silenced_rate across episodes", s.SilencedRate, 0.625)
 }
 
-func TestOffhoursRateUsesConfiguredLocation(t *testing.T) {
+// TestNormaliseOffHoursRescalesAgainstTheWorkingWeek pins the rescaling that
+// makes offhours_rate a signal at all.
+//
+// isOffHours calls 123 of the week's 168 hours off-hours (168 - 5 weekdays x 9
+// business hours), so ANY rule firing round the clock scores 0.732 raw. The
+// raw number therefore separated nothing, while adding a flat ~7.3 points to
+// every noise score -- and noisyThreshold had been calibrated with that
+// constant baked in. Normalised, the signal reports excess nocturnal firing.
+func TestNormaliseOffHoursRescalesAgainstTheWorkingWeek(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  float64
+		want float64
+	}{
+		{"never off-hours", 0, 0},
+		{"mostly in-hours", 0.5, 0},
+		{"exactly the uniform baseline", offHoursBaseline, 0},
+		// Halfway between the baseline and always-nocturnal: (0.732+1)/2.
+		{"halfway above the baseline", (offHoursBaseline + 1) / 2, 0.5},
+		{"only ever at night", 1, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			closeTo(t, "normalised offhours_rate", normaliseOffHours(c.raw), c.want)
+		})
+	}
+}
+
+// TestOffhoursRateIsZeroForARuleFavouringOfficeHours is the same property
+// measured end-to-end: half the fires in hours is BELOW the uniform baseline,
+// so the rule contributes nothing to the noise score on this axis.
+func TestOffhoursRateIsZeroForARuleFavouringOfficeHours(t *testing.T) {
 	// base is Tuesday 10:00 UTC, inside hours. +12h is 22:00, outside.
 	eps := []store.Episode{
 		ep(1, "a", 0, time.Minute),
 		ep(1, "a", 12*time.Hour, time.Minute),
 	}
 	s := Compute(Input{Rule: rule(0), Episodes: eps, Location: time.UTC})
-	closeTo(t, "offhours_rate", s.OffhoursRate, 0.5)
+	closeTo(t, "offhours_rate", s.OffhoursRate, 0)
 }
 
 func TestOffhoursRateTreatsWeekendsAsOffHours(t *testing.T) {

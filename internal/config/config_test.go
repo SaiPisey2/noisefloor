@@ -103,3 +103,17 @@ func TestLoadRejectsNonPositiveTimeout(t *testing.T) {
 		t.Fatal("Load succeeded with timeout: 0s, want error")
 	}
 }
+
+// TestDefaultTimezoneIsUTC pins reproducibility. Timezone decides which fires
+// count as off-hours, and off-hours is a scored signal, so a "Local" default
+// would score the same database differently on a CET laptop and in a UTC CI
+// container -- and could hand back a different verdict for the same history.
+func TestDefaultTimezoneIsUTC(t *testing.T) {
+	if got := Default().Timezone; got != "UTC" {
+		t.Errorf("default timezone = %q, want %q; scoring must not depend on "+
+			"where the scan happened to run", got, "UTC")
+	}
+	if loc := Default().Location(); loc != time.UTC {
+		t.Errorf("default Location() = %v, want UTC", loc)
+	}
+}

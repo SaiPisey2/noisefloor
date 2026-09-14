@@ -31,6 +31,21 @@ const (
 
 	businessStartHour = 9
 	businessEndHour   = 18
+
+	// offHoursBaseline is the share of an ordinary week that isOffHours calls
+	// off-hours: 168 hours a week, minus 5 weekdays x 9 business hours
+	// (09:00-18:00) = 45 on-hours, leaving 123. 123/168 = 0.732.
+	//
+	// That is what the RAW rate measures, and it is why the raw rate was
+	// useless. Any rule firing round the clock scored ~0.73 -- so the signal
+	// discriminated nothing between the noisiest rule and the healthiest one,
+	// while adding a flat ~7.3 points to every noise score. The threshold had
+	// been calibrated with that constant baked in.
+	//
+	// Rescaling against the baseline makes the signal measure what it was
+	// always meant to: DISPROPORTIONATELY nocturnal firing. A uniformly-firing
+	// rule scores 0, a rule that only ever fires at night scores 1.
+	offHoursBaseline = 123.0 / 168.0
 )
 
 type Signals struct {
@@ -127,7 +142,7 @@ func Compute(in Input) Signals {
 	s.P50Duration = percentile(durations, 0.50)
 	s.P90Duration = percentile(durations, 0.90)
 	s.ShortLivedRate = shortLived / n
-	s.OffhoursRate = offhours / n
+	s.OffhoursRate = normaliseOffHours(offhours / n)
 	s.FlapRate = flapRate(byFingerprint, len(firing))
 	s.CofireRatio = cofireRatio(firing, in.AllEpisodes, in.Rule.ID)
 	s.Concentration = concentration(byFingerprint)
@@ -162,6 +177,15 @@ func shortLivedThreshold(r store.Rule) time.Duration {
 	default:
 		return scaled
 	}
+}
+
+// normaliseOffHours rescales the raw off-hours share against what an
+// indifferent rule would score, so the signal reports excess nocturnal firing
+// rather than the shape of the working week. Below the baseline is not
+// "negative night-time"; it is simply a rule that favours office hours, which
+// carries no noise, so the result floors at 0.
+func normaliseOffHours(raw float64) float64 {
+	return math.Max(0, math.Min(1, (raw-offHoursBaseline)/(1-offHoursBaseline)))
 }
 
 func isOffHours(t time.Time) bool {

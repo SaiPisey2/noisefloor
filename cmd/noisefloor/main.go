@@ -30,7 +30,11 @@ alertmanager:
 database: noisefloor.db
 window: 30d
 timeout: 10m
-timezone: Local
+
+# Which fires count as off-hours, and off-hours is a scored signal. Keep this
+# explicit: "Local" would score the same database differently on a CET laptop
+# and in a UTC CI container. Set your team's working timezone if it is not UTC.
+timezone: UTC
 
 # Weights must sum to 1.0. Only these five signals move the noise score.
 weights:

@@ -20,22 +20,32 @@ const (
 	minConfidence = 0.5
 	// noisyThreshold is where a rule stops being merely imperfect.
 	//
-	// 35, not 50, because no real rule is bad in all five scored dimensions at
-	// once. flap_rate and cofire_ratio carry 0.35 of the weight between them
+	// Well below 50, because no real rule is bad in all five scored dimensions
+	// at once. flap_rate and cofire_ratio carry 0.35 of the weight between them
 	// and are structurally mutually exclusive with the retire archetype: a rule
 	// that self-resolves and gets silenced does not also flap. That 0.35 is
 	// therefore unreachable for exactly the rules `retire` exists to catch, and
 	// a threshold of 50 would demand a rule be bad in nearly every dimension
 	// simultaneously -- which does not happen.
 	//
-	// Measured archetypes under the default weights:
-	//	retire   (self-resolving, silenced)  ~62
-	//	flapping (short episodes, re-fires)  ~57
-	//	cause    (fires alongside everything) ~52
-	//	healthy  (long, rare, unsilenced)      ~6
+	// Archetypes under the default weights (short 0.30, silenced 0.25,
+	// flap 0.20, cofire 0.15, offhours 0.10), now that offhours_rate is
+	// normalised against the working week and no longer adds a flat ~7.3 to
+	// every rule:
 	//
-	// 35 sits well clear of healthy and below every pathological archetype.
-	noisyThreshold = 35
+	//	retire   (self-resolving + silenced)   0.30 + 0.25          ~55
+	//	flapping (short episodes, re-fires)    0.30 + 0.20          ~50
+	//	cause    (fires alongside everything)  0.30 + 0.15          ~45
+	//	self-resolver (short-lived, nothing else)     0.30          ~30
+	//	healthy  (long, rare, unsilenced)                            ~2
+	//
+	// 30 is the floor at which a rule that ONLY ever self-resolves is
+	// actionable: short_lived_rate alone carries 0.30 of the weight, so a rule
+	// whose every episode resolves before anyone could act scores exactly 30
+	// and nothing else about it needs to be wrong for that to be worth saying.
+	// Anything higher would require a second pathology before the clearest
+	// single one counts.
+	noisyThreshold = 30
 
 	flapTuneThreshold          = 0.3
 	concentrationTuneThreshold = 0.6
