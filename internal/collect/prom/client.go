@@ -35,10 +35,15 @@ type RuleGroup struct {
 type Client interface {
 	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (model.Matrix, error)
 	Rules(ctx context.Context) ([]RuleGroup, error)
-	RetentionFloor(ctx context.Context) (time.Time, error)
+	RetentionFloor(ctx context.Context, from, to time.Time) (time.Time, error)
 }
 
 type API struct{ v1 v1.API }
+
+// An interface nothing asserts against is an interface that silently rots.
+// This caught a real mismatch: RetentionFloor's signature changed and the
+// interface was left behind, compiling cleanly because no code connected them.
+var _ Client = (*API)(nil)
 
 func New(cfg config.Prometheus) (*API, error) {
 	c, err := promapi.NewClient(promapi.Config{Address: cfg.URL})
@@ -66,6 +71,9 @@ func (a *API) QueryRange(ctx context.Context, query string, start, end time.Time
 }
 
 func (a *API) Rules(ctx context.Context) ([]RuleGroup, error) {
+	// client_golang v1.24+ added a matcher-set argument to filter rule groups
+	// by series selector; nil means "no filter, return all rule groups",
+	// which is what we want here.
 	res, err := a.v1.Rules(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch rules: %w", err)
