@@ -1,0 +1,30 @@
+# Fixture rule file for internal/pr's diff-generation tests. Deliberately
+# carries comments and unusual spacing that a surgical edit must leave
+# completely untouched, everywhere except the lines actually being changed.
+groups:
+  - name: fixture
+    rules:
+      # A rule with nothing unusual about it, used to exercise a plain
+      # retire (delete) edit.
+      - alert: RetireMe
+        expr: up == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "always down"
+      # This blank line and comment sit between RetireMe and TuneMe, and
+      # belong to RetireMe's span (remediate.LocateRules' next-sibling
+      # boundary) -- a retire edit is expected to remove them too.
+
+      - alert: TuneMe
+        expr: rate(errors_total[5m]) > 0
+        for:    45s   # keep this pager quiet during a deploy
+        labels:
+          team: payments
+        annotations:
+          runbook: "https://runbooks.example/tuneme"
+
+      - alert: NoForField
+        expr: up == 0
+        labels:
+          severity: warning

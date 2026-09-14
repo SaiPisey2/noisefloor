@@ -12,6 +12,7 @@ import (
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/pr"
 	"github.com/SaiPisey2/noisefloor/internal/report"
 	"github.com/SaiPisey2/noisefloor/internal/scanner"
 	"github.com/SaiPisey2/noisefloor/internal/store"
@@ -106,6 +107,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "remediate":
+		if err := runRemediate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -118,6 +124,7 @@ func usage() {
 usage:
   noisefloor scan [-config noisefloor.yaml]
   noisefloor init [-config noisefloor.yaml]
+  noisefloor remediate [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
 `)
 }
 
@@ -182,4 +189,86 @@ func runScan(args []string) error {
 	}
 
 	return report.Render(os.Stdout, result.Rows, result.Meta)
+}
+
+// runRemediate scores rules exactly as `scan` does (via scanner.RunFull),
+// then builds a pull-request proposal for every rule that qualifies:
+// GitHub first, one PR per rule, dry-run unless -apply is passed.
+func runRemediate(args []string) error {
+	fs := flag.NewFlagSet("remediate", flag.ExitOnError)
+	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
+	apply := fs.Bool("apply", false, "open PRs for real (default: dry run, prints what would be opened)")
+	owner := fs.String("owner", "", "GitHub repository owner (required with -apply)")
+	repoName := fs.String("repo", "", "GitHub repository name (required with -apply)")
+	base := fs.String("base", "main", "base branch to open PRs against")
+	tokenFlag := fs.String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Rules.Path == "" {
+		return fmt.Errorf("rules.path is not configured; remediate needs a git checkout of the " +
+			"rule files to locate each rule in and edit (see README's Remediation section)")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout.Std())
+	defer cancel()
+
+	db, err := store.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	api, err := prom.New(cfg.Prometheus)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	result, err := scanner.RunFull(ctx, cfg, db, api, now)
+	if err != nil {
+		return err
+	}
+
+	// The idempotence check (FindOpenPR) is a read-only GitHub call, so it
+	// runs in dry run too whenever -owner/-repo are given -- a dry run
+	// against a repo that already has an open PR for a rule should say so,
+	// not just repeat "would open" forever. -token is only REQUIRED with
+	// -apply (EnsureBranch/CommitFiles/OpenPR need write access); a public
+	// repo's PRs can be listed unauthenticated. With no -owner/-repo at
+	// all, there is no repository to check against, so a fake provider
+	// stands in and the idempotence check is simply skipped.
+	var provider pr.Provider
+	switch {
+	case *owner != "" && *repoName != "":
+		token := *tokenFlag
+		if token == "" {
+			token = os.Getenv("GITHUB_TOKEN")
+		}
+		if *apply && token == "" {
+			return fmt.Errorf("-apply requires a GitHub token: pass -token or set $GITHUB_TOKEN")
+		}
+		provider = pr.NewGitHubProvider(token)
+	case *apply:
+		return fmt.Errorf("-apply requires -owner and -repo (which GitHub repository to open PRs against)")
+	default:
+		provider = pr.NewFakeProvider()
+	}
+
+	runResult, err := pr.Run(ctx, provider, result.Evals, pr.RunOptions{
+		Owner: *owner, Repo: *repoName, Base: *base, RepoRoot: cfg.Rules.Path, Apply: *apply,
+	})
+	if err != nil {
+		return err
+	}
+
+	pr.WriteResult(os.Stdout, runResult, *apply)
+	return nil
 }
