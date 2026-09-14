@@ -131,6 +131,55 @@ func TestRunClampsToRetentionFloor(t *testing.T) {
 	}
 }
 
+// TestRunTreatsSubProbeStepFloorAsNotTruncated guards against the probe's own
+// granularity being mistaken for evidence of truncation. Over a 30-day window
+// the probe step is exactly 1h; a floor only minutes past `from` is
+// measurement noise, not retention actually clipping anything -- and the
+// same scan must not flip between "limited by retention" and not depending
+// on where the probe's hourly samples happened to land.
+func TestRunTreatsSubProbeStepFloorAsNotTruncated(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	from := now.Add(-30 * 24 * time.Hour)
+	floor := from.Add(10 * time.Minute)
+
+	p := &fakeProm{floor: floor}
+	b := New(p, newFakeStore(), testConfig())
+
+	res, err := b.Run(context.Background(), from, now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.WindowStart.Equal(floor) {
+		t.Errorf("window start = %v, want retention floor %v (the window shown must stay truthful)", res.WindowStart, floor)
+	}
+	if res.Truncated {
+		t.Error("Truncated must be false when the floor is within one probe step of `from`")
+	}
+}
+
+// TestRunTreatsBeyondProbeStepFloorAsTruncated is the other side of the same
+// guard: a floor genuinely hours past `from` is real evidence of truncation,
+// not probe noise, and must still be reported.
+func TestRunTreatsBeyondProbeStepFloorAsTruncated(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	from := now.Add(-30 * 24 * time.Hour)
+	floor := from.Add(3 * time.Hour)
+
+	p := &fakeProm{floor: floor}
+	b := New(p, newFakeStore(), testConfig())
+
+	res, err := b.Run(context.Background(), from, now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.WindowStart.Equal(floor) {
+		t.Errorf("window start = %v, want retention floor %v", res.WindowStart, floor)
+	}
+	if !res.Truncated {
+		t.Error("Truncated must be true when the floor is well beyond one probe step past `from`")
+	}
+}
+
 func TestRunTreatsNoHistoryAsAnEmptyWindowNotAnError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	p := &fakeProm{noData: true}

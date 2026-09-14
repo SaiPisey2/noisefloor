@@ -99,7 +99,15 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 		return res, fmt.Errorf("determine retention floor: %w", err)
 	case floor.After(from):
 		res.WindowStart = floor
-		res.Truncated = true
+
+		// The floor is a probe result, granular to one probe step, so a floor
+		// a few minutes past `from` is measurement noise rather than evidence
+		// that retention clipped anything. Without this guard the same scan
+		// reports "limited by retention" on one run and not the next, purely
+		// from where the probe's samples happened to land -- which makes the
+		// tool look unreliable about the one thing it exists to be trusted on.
+		probeStep := to.Sub(from) / prom.ProbePoints
+		res.Truncated = floor.Sub(from) > probeStep
 	}
 
 	step := b.cfg.Prometheus.Step.Std()

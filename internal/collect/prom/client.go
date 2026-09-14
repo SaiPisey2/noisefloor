@@ -103,10 +103,14 @@ func (a *API) Rules(ctx context.Context) ([]RuleGroup, error) {
 	return out, nil
 }
 
-// probePoints is how many samples the retention probe asks for. 720 keeps a
+// ProbePoints is how many samples the retention probe asks for. 720 keeps a
 // 30-day probe at one point per hour, which is ample to locate the first hour
 // that has any ALERTS data at all.
-const probePoints = 720
+//
+// Exported because the caller needs the same number to know how precise the
+// returned floor actually is: it is granular to one probe step, so a floor
+// slightly past the requested start is noise, not truncation.
+const ProbePoints = 720
 
 // RetentionFloor reports the oldest timestamp within [from, to) for which
 // Prometheus can still answer questions about ALERTS, so reports never imply
@@ -127,7 +131,7 @@ func (a *API) RetentionFloor(ctx context.Context, from, to time.Time) (time.Time
 			from.Format(time.RFC3339), to.Format(time.RFC3339))
 	}
 
-	step := to.Sub(from) / probePoints
+	step := to.Sub(from) / ProbePoints
 	if step < time.Minute {
 		step = time.Minute
 	}
