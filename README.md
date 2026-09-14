@@ -127,6 +127,43 @@ fires count as off-hours, which is a scored signal, so `Local` would let the
 same database produce different verdicts on a CET laptop and in a UTC CI
 container. Set your team's working timezone if it is not UTC.
 
+## Authentication
+
+Prometheus and Alertmanager each take their own `auth` block, since they
+frequently sit behind different gateways. Supported per endpoint: a bearer
+token (inline or from a file, re-read on every request so a rotated token
+takes effect without a restart), basic auth (username plus an inline or
+file-based password), and TLS (a private CA, a client certificate for mutual
+TLS, or skipping verification). Bearer and basic auth are mutually exclusive
+per endpoint.
+
+Bearer token from a file, the usual shape for a managed Prometheus behind an
+oauth2-proxy or similar:
+
+```yaml
+prometheus:
+  url: https://prometheus.example.com
+  auth:
+    bearer_token_file: /etc/noisefloor/prometheus-token
+```
+
+Mutual TLS against a Prometheus that presents a private CA and expects a
+client certificate:
+
+```yaml
+prometheus:
+  url: https://prometheus.internal:9090
+  auth:
+    tls:
+      ca_file: /etc/noisefloor/ca.pem
+      cert_file: /etc/noisefloor/client.pem
+      key_file: /etc/noisefloor/client-key.pem
+```
+
+`tls.insecure_skip_verify` disables certificate verification entirely. Only
+set it against a host you control, such as a self-signed instance on your
+own machine -- never a shared or production endpoint.
+
 ## Demo
 
 ```
