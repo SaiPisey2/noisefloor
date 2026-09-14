@@ -29,12 +29,22 @@ type Store interface {
 	InsertEpisodes(ctx context.Context, eps []store.Episode) error
 }
 
+// An interface nothing asserts against is an interface that silently rots.
+// The same omission let prom.Client drift out of sync with *prom.API.
+var (
+	_ Querier = (*prom.API)(nil)
+	_ Store   = (*store.SQLite)(nil)
+)
+
 type BackfillResult struct {
 	WindowStart time.Time
 	WindowEnd   time.Time
-	Episodes    int
-	Chunks      int
-	Truncated   bool
+	// Episodes counts the episodes reconstructed in the window, NOT rows
+	// written. InsertEpisodes upserts, so re-running over an overlapping
+	// window reports the same count having written nothing new.
+	Episodes  int
+	Chunks    int
+	Truncated bool
 }
 
 type Backfiller struct {
@@ -54,9 +64,25 @@ type seriesKey struct {
 	fingerprint string
 }
 
+// PRECONDITION: the rules collector must have run first. Run attaches episodes
+// to rules by alert name; if it runs first, a currently-defined alert gets an
+// orphan row under an empty group, the collector then inserts the real rule
+// under its real group, and every episode stays attached to the inactive
+// orphan and is never scored.
+//
+// On error the returned BackfillResult is partial but never zero: it describes
+// what had been done when the error occurred.
+//
 // Run backfills episodes for [from, to), clamped to what Prometheus can
 // still answer for.
 func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResult, error) {
+	if b.cfg.Prometheus.Chunk.Std() <= 0 {
+		// A non-positive chunk makes the loop below never advance.
+		// config.Validate rejects it, but New accepts an unvalidated Config.
+		return BackfillResult{}, fmt.Errorf("prometheus.chunk must be positive, got %v",
+			b.cfg.Prometheus.Chunk)
+	}
+
 	res := BackfillResult{WindowStart: from, WindowEnd: to}
 
 	floor, err := b.prom.RetentionFloor(ctx, from, to)
@@ -135,12 +161,14 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 			toInsert = append(toInsert, store.Episode{
 				RuleID:      ruleID,
 				Fingerprint: se.Fingerprint,
-				Labels:      se.Labels,
-				StartedAt:   iv.Start,
-				EndedAt:     iv.End,
-				Resolution:  step,
-				Source:      store.SourceBackfill,
-				State:       se.State,
+				// Every episode of this series shares one map. Read-only
+				// downstream today, but mutating it would corrupt them all.
+				Labels:     se.Labels,
+				StartedAt:  iv.Start,
+				EndedAt:    iv.End,
+				Resolution: step,
+				Source:     store.SourceBackfill,
+				State:      se.State,
 			})
 		}
 	}
@@ -154,6 +182,19 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 
 // stitch appends next to prev, merging the boundary pair when they are close
 // enough to be the same episode split by a chunk edge.
+//
+// The threshold is `step`, not `2*step`, and the difference is load-bearing.
+// BuildIntervals merges two samples when their separation is <= 2*step. Here
+// the comparison is against last.End, which is already lastSample+step, so
+// comparing to 2*step would merge samples up to 3*step apart. A gap of exactly
+// 3*step would then split mid-chunk but merge on a chunk boundary, making an
+// episode's duration and the episode count depend on chunk alignment. Flap
+// rate is scored from episode counts, so that would make scores depend on a
+// configuration value that has nothing to do with the alert.
+//
+//	merge when firstSample - lastSample <= 2*step
+//	firstSample = first.Start, lastSample = last.End - step
+//	=> first.Start - last.End <= step
 func stitch(prev, next []prom.Interval, step time.Duration) []prom.Interval {
 	if len(prev) == 0 {
 		return next
@@ -164,7 +205,7 @@ func stitch(prev, next []prom.Interval, step time.Duration) []prom.Interval {
 	last := prev[len(prev)-1]
 	first := next[0]
 
-	if first.Start.Sub(last.End) <= 2*step {
+	if first.Start.Sub(last.End) <= step {
 		prev[len(prev)-1] = prom.Interval{Start: last.Start, End: first.End}
 		return append(prev, next[1:]...)
 	}

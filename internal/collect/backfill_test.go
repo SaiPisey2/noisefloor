@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,10 +18,19 @@ type fakeProm struct {
 	noData   bool
 	calls    [][2]time.Time
 	matrixFn func(start, end time.Time) model.Matrix
+
+	// failAt, when non-zero, makes the failAt'th call (1-based) to QueryRange
+	// return queryErr instead of matrixFn's result, so a mid-chunk query
+	// failure can be exercised.
+	failAt   int
+	queryErr error
 }
 
 func (f *fakeProm) QueryRange(_ context.Context, _ string, start, end time.Time, _ time.Duration) (model.Matrix, error) {
 	f.calls = append(f.calls, [2]time.Time{start, end})
+	if f.failAt != 0 && len(f.calls) == f.failAt {
+		return nil, f.queryErr
+	}
 	if f.matrixFn == nil {
 		return model.Matrix{}, nil
 	}
@@ -36,14 +46,20 @@ func (f *fakeProm) RetentionFloor(_ context.Context, from, to time.Time) (time.T
 
 type fakeStore struct {
 	rules    map[string]int64
-	byName   map[string]int64 // rules the rules collector already created
-	inactive []string         // alert names recorded as orphans
+	byName   map[string]int64      // rules the rules collector already created
+	created  map[string]store.Rule // every rule UpsertRule has created, by alert name
+	inactive []string              // alert names recorded as orphans
 	episodes []store.Episode
 	nextID   int64
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{rules: map[string]int64{}, byName: map[string]int64{}, nextID: 1}
+	return &fakeStore{
+		rules:   map[string]int64{},
+		byName:  map[string]int64{},
+		created: map[string]store.Rule{},
+		nextID:  1,
+	}
 }
 
 // withRule pre-registers a rule, standing in for the rules collector having
@@ -63,7 +79,16 @@ func (s *fakeStore) UpsertRule(_ context.Context, r *store.Rule) (int64, error) 
 	id := s.nextID
 	s.nextID++
 	s.rules[key] = id
-	s.inactive = append(s.inactive, r.AlertName)
+	// The real store's ON CONFLICT (group_name, alert_name) means a rule is
+	// findable by RuleIDByAlertName the instant it is upserted; byName must
+	// reflect that so a later lookup for the same alert (a second series
+	// fingerprint, or a later chunk) finds this row instead of racing to
+	// create a second one.
+	s.byName[r.AlertName] = id
+	s.created[r.AlertName] = *r
+	if !r.Active {
+		s.inactive = append(s.inactive, r.AlertName)
+	}
 	return id, nil
 }
 
@@ -271,5 +296,182 @@ func TestRunRecordsUnknownAlertAsInactiveOrphan(t *testing.T) {
 	}
 	if len(fs.inactive) != 1 || fs.inactive[0] != "Deleted" {
 		t.Errorf("orphans = %v, want [Deleted] recorded as inactive history", fs.inactive)
+	}
+	// A rule recorded Active: true would be scored, contradicting "never
+	// scored" for a series with no live rule. appending to fs.inactive alone
+	// does not pin this: assert the field the code actually set.
+	if got := fs.created["Deleted"]; got.Active {
+		t.Errorf("orphan rule %q recorded Active = true, want false", "Deleted")
+	}
+}
+
+// TestStitchThresholdMatchesBuildIntervalsGapRule pins the merge threshold
+// derived from BuildIntervals' own gap rule. BuildIntervals splits a gap of
+// more than 2*step; expressed as a gap between two Intervals (whose End is
+// already lastSample+step), that boundary is `step`, not `2*step`. A gap of
+// exactly 3*step between raw samples must split into two episodes whether it
+// falls mid-chunk (BuildIntervals' job) or on a chunk boundary (stitch's job)
+// — the episode count must not depend on where the chunk edge happens to
+// land.
+func TestStitchThresholdMatchesBuildIntervalsGapRule(t *testing.T) {
+	step := time.Minute
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	// Chunk 1 covers [t0, t0+10m) and ends with a sample at t0+9m.
+	// Chunk 2 covers [t0+10m, t0+20m) and starts with a sample at t0+12m.
+	// Raw sample gap = 12m - 9m = 3*step, which BuildIntervals would split.
+	lastSample := t0.Add(9 * time.Minute)
+	firstSample := t0.Add(12 * time.Minute)
+
+	p := &fakeProm{
+		floor: t0.Add(-24 * time.Hour),
+		matrixFn: func(cs, ce time.Time) model.Matrix {
+			var vals []model.SamplePair
+			for _, st := range []time.Time{lastSample, firstSample} {
+				if !st.Before(cs) && st.Before(ce) {
+					vals = append(vals, model.SamplePair{
+						Timestamp: model.TimeFromUnix(st.Unix()), Value: 1,
+					})
+				}
+			}
+			if len(vals) == 0 {
+				return model.Matrix{}
+			}
+			return model.Matrix{{
+				Metric: model.Metric{
+					"__name__": "ALERTS", "alertname": "GapBoundary",
+					"alertstate": "firing", "instance": "x",
+				},
+				Values: vals,
+			}}
+		},
+	}
+
+	cfg := testConfig()
+	cfg.Prometheus.Step = config.Duration(step)
+	cfg.Prometheus.Chunk = config.Duration(10 * time.Minute)
+
+	fs := newFakeStore().withRule("GapBoundary")
+	b := New(p, fs, cfg)
+
+	res, err := b.Run(context.Background(), t0, t0.Add(20*time.Minute))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Chunks != 2 {
+		t.Fatalf("chunks = %d, want 2 (the boundary this test depends on)", res.Chunks)
+	}
+	if len(fs.episodes) != 2 {
+		t.Fatalf("got %d episodes, want 2: a 3*step gap must split, matching "+
+			"what BuildIntervals does for the same gap mid-chunk", len(fs.episodes))
+	}
+}
+
+// TestRunReturnsPartialResultOnMidChunkQueryError exercises the query-error
+// path, which a fake that can never fail leaves untested.
+func TestRunReturnsPartialResultOnMidChunkQueryError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	wantErr := errors.New("prometheus unavailable")
+
+	// 24h window / 6h chunk = 4 chunks; fail on the second.
+	p := &fakeProm{
+		floor:    now.Add(-30 * 24 * time.Hour),
+		failAt:   2,
+		queryErr: wantErr,
+	}
+	b := New(p, newFakeStore(), testConfig())
+
+	res, err := b.Run(context.Background(), now.Add(-24*time.Hour), now)
+	if err == nil {
+		t.Fatal("Run: want error from the failing chunk, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error = %v, want it to wrap %v", err, wantErr)
+	}
+	if res.Chunks == 0 {
+		t.Error("Chunks = 0, want the chunks attempted before the failure")
+	}
+	if res.WindowStart.IsZero() || res.WindowEnd.IsZero() {
+		t.Error("WindowStart/WindowEnd are zero; Run must describe the window " +
+			"it was working on even when it fails mid-chunk")
+	}
+}
+
+// inclusiveMatrixFn mimics real Prometheus query_range semantics: samples at
+// both the start and end of the range are included, so two adjacent chunks
+// both return the sample that sits exactly on their shared boundary. The
+// fakes elsewhere in this file use a half-open [cs, ce) convention instead,
+// which never exercises this overlap.
+func inclusiveMatrixFn(alertName string, step time.Duration) func(cs, ce time.Time) model.Matrix {
+	return func(cs, ce time.Time) model.Matrix {
+		var vals []model.SamplePair
+		for t := cs; !t.After(ce); t = t.Add(step) {
+			vals = append(vals, model.SamplePair{
+				Timestamp: model.TimeFromUnix(t.Unix()), Value: 1,
+			})
+		}
+		return model.Matrix{{
+			Metric: model.Metric{
+				"__name__": "ALERTS", "alertname": model.LabelValue(alertName),
+				"alertstate": "firing", "instance": "x",
+			},
+			Values: vals,
+		}}
+	}
+}
+
+// TestRunHandlesQueryRangeEndpointOverlap checks that a sample duplicated
+// across a chunk boundary, as real query_range would return, neither splits
+// an episode in two nor inflates its duration. Written against the corrected
+// stitch threshold (step, not 2*step).
+func TestRunHandlesQueryRangeEndpointOverlap(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	start := now.Add(-12 * time.Hour)
+	step := time.Minute
+
+	p := &fakeProm{
+		floor:    start.Add(-24 * time.Hour),
+		matrixFn: inclusiveMatrixFn("Continuous", step),
+	}
+	fs := newFakeStore().withRule("Continuous")
+	b := New(p, fs, testConfig())
+
+	if _, err := b.Run(context.Background(), start, now); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fs.episodes) != 1 {
+		t.Fatalf("got %d episodes, want 1; a boundary sample duplicated by "+
+			"both adjacent chunks must not split or double-count an episode",
+			len(fs.episodes))
+	}
+	got := fs.episodes[0].Duration()
+	if got < 11*time.Hour || got > 13*time.Hour {
+		t.Errorf("stitched duration = %v, want close to 12h; a duplicated "+
+			"boundary sample must not inflate duration", got)
+	}
+}
+
+// TestFakeStoreRuleIDByAlertNameSeesUpsertedRule pins fakeStore's fidelity to
+// the real store: RuleIDByAlertName must find a rule immediately after
+// UpsertRule creates it, mirroring the real store's
+// ON CONFLICT (group_name, alert_name), which makes a second lookup or
+// upsert for the same alert idempotent rather than racing to create a
+// duplicate row.
+func TestFakeStoreRuleIDByAlertNameSeesUpsertedRule(t *testing.T) {
+	fs := newFakeStore()
+	ctx := context.Background()
+
+	id, err := fs.UpsertRule(ctx, &store.Rule{AlertName: "Deleted", GroupName: ""})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+
+	gotID, found, err := fs.RuleIDByAlertName(ctx, "Deleted")
+	if err != nil {
+		t.Fatalf("RuleIDByAlertName: %v", err)
+	}
+	if !found || gotID != id {
+		t.Errorf("RuleIDByAlertName after UpsertRule = (%d, %v), want (%d, true)",
+			gotID, found, id)
 	}
 }
