@@ -17,7 +17,9 @@ func defaultConfidence() config.Confidence { return config.Default().Confidence 
 // exercise verdict logic rather than the confidence gate.
 func confident(s Signals) Signals {
 	s.Fires = 100
-	s.UniqueFingerprints = 5
+	// Full fingerprint diversity, so tests that go through Confidence() are
+	// not also, incidentally, testing the diversity discount.
+	s.UniqueFingerprints = 100
 	return s
 }
 
@@ -51,6 +53,9 @@ func TestNoiseScoreAppliesWeights(t *testing.T) {
 	}
 }
 
+// These fixtures set UniqueFingerprints equal to Fires (full diversity) so
+// they isolate the episode-count and window axes from the fingerprint
+// diversity discount, which has its own test below.
 func TestConfidenceGrowsWithEpisodes(t *testing.T) {
 	c := defaultConfidence() // min_episodes 10, min_window 14d
 	window := 30 * 24 * time.Hour
@@ -58,10 +63,10 @@ func TestConfidenceGrowsWithEpisodes(t *testing.T) {
 	if got := Confidence(Signals{Fires: 0}, window, c); got != 0 {
 		t.Errorf("confidence with 0 fires = %v, want 0", got)
 	}
-	if got := Confidence(Signals{Fires: 5}, window, c); math.Abs(got-0.5) > 0.001 {
+	if got := Confidence(Signals{Fires: 5, UniqueFingerprints: 5}, window, c); math.Abs(got-0.5) > 0.001 {
 		t.Errorf("confidence with 5 fires = %v, want 0.5", got)
 	}
-	if got := Confidence(Signals{Fires: 50}, window, c); got != 1 {
+	if got := Confidence(Signals{Fires: 50, UniqueFingerprints: 50}, window, c); got != 1 {
 		t.Errorf("confidence with 50 fires = %v, want 1 (capped)", got)
 	}
 }
@@ -69,9 +74,34 @@ func TestConfidenceGrowsWithEpisodes(t *testing.T) {
 func TestConfidenceIsLimitedByShortWindow(t *testing.T) {
 	c := defaultConfidence()
 	// Plenty of fires, but only 7 days observed against a 14 day minimum.
-	got := Confidence(Signals{Fires: 1000}, 7*24*time.Hour, c)
+	got := Confidence(Signals{Fires: 1000, UniqueFingerprints: 1000}, 7*24*time.Hour, c)
 	if math.Abs(got-0.5) > 0.001 {
 		t.Errorf("confidence = %v, want 0.5, limited by window", got)
+	}
+}
+
+// TestConfidenceDiscountsConcentratedFingerprints pins the new confidence
+// input: the same fire count is worth less when it all lands on one series.
+func TestConfidenceDiscountsConcentratedFingerprints(t *testing.T) {
+	c := defaultConfidence()
+	window := 30 * 24 * time.Hour
+
+	concentrated := Confidence(Signals{Fires: 50, UniqueFingerprints: 1}, window, c)
+	diverse := Confidence(Signals{Fires: 50, UniqueFingerprints: 50}, window, c)
+
+	if diverse <= concentrated {
+		t.Errorf("diverse confidence %.3f should exceed concentrated confidence %.3f",
+			diverse, concentrated)
+	}
+	if math.Abs(diverse-1) > 0.001 {
+		t.Errorf("fully diverse confidence = %.3f, want 1", diverse)
+	}
+	// The discount floors just above 0.8 of the base score here (one
+	// fingerprint out of 50 fires still contributes a sliver of diversity
+	// credit) -- concentration never zeroes confidence outright, it only
+	// discounts it.
+	if want := 0.8 + 0.2*(1.0/50.0); math.Abs(concentrated-want) > 0.001 {
+		t.Errorf("fully concentrated confidence = %.3f, want %.3f", concentrated, want)
 	}
 }
 

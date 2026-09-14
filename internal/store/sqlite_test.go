@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,9 +88,9 @@ func TestInsertEpisodesDedupes(t *testing.T) {
 		t.Fatalf("re-InsertEpisodes: %v", err)
 	}
 
-	got, err := db.ListEpisodes(ctx, id, start.Add(-time.Hour), start.Add(time.Hour))
+	got, err := db.ListEpisodesInWindow(ctx, start.Add(-time.Hour), start.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("ListEpisodes: %v", err)
+		t.Fatalf("ListEpisodesInWindow: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d episodes, want 1 after duplicate insert", len(got))
@@ -119,9 +120,9 @@ func TestListEpisodesRespectsWindow(t *testing.T) {
 		t.Fatalf("InsertEpisodes: %v", err)
 	}
 
-	got, err := db.ListEpisodes(ctx, id, base.Add(-time.Hour), base.Add(time.Hour))
+	got, err := db.ListEpisodesInWindow(ctx, base.Add(-time.Hour), base.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("ListEpisodes: %v", err)
+		t.Fatalf("ListEpisodesInWindow: %v", err)
 	}
 	if len(got) != 1 || got[0].Fingerprint != "a" {
 		t.Fatalf("window filter wrong: got %d episodes %+v", len(got), got)
@@ -159,28 +160,10 @@ func TestUpsertSilencesRoundTripsMatchers(t *testing.T) {
 	}
 }
 
-func TestMetaRoundTrip(t *testing.T) {
-	ctx := context.Background()
-	db := openTest(t)
-
-	if _, err := db.Meta(ctx, "missing"); err == nil {
-		t.Fatal("Meta on missing key succeeded, want error")
-	}
-	if err := db.SetMeta(ctx, "retention_floor", "1700000000"); err != nil {
-		t.Fatalf("SetMeta: %v", err)
-	}
-	if err := db.SetMeta(ctx, "retention_floor", "1700000001"); err != nil {
-		t.Fatalf("SetMeta overwrite: %v", err)
-	}
-	v, err := db.Meta(ctx, "retention_floor")
-	if err != nil {
-		t.Fatalf("Meta: %v", err)
-	}
-	if v != "1700000001" {
-		t.Errorf("meta = %q, want 1700000001", v)
-	}
-}
-
+// TestUpsertScoreReplaces reads the row back through the raw *sql.DB rather
+// than a store method: no exported reader of the scores table has a consumer
+// outside this test (ListScores was removed as dead API surface), and adding
+// one back just to assert here would recreate the thing being avoided.
 func TestUpsertScoreReplaces(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
@@ -199,18 +182,34 @@ func TestUpsertScoreReplaces(t *testing.T) {
 	if err := db.UpsertScore(ctx, sc); err != nil {
 		t.Fatalf("UpsertScore replace: %v", err)
 	}
-	got, err := db.ListScores(ctx, base.Add(24*time.Hour))
+
+	rows, err := db.db.QueryContext(ctx,
+		`SELECT rule_id, noise_score, signals FROM scores WHERE rule_id = ?`, id)
 	if err != nil {
-		t.Fatalf("ListScores: %v", err)
+		t.Fatalf("query scores: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d scores, want 1", len(got))
+	defer rows.Close()
+
+	var count int
+	var noiseScore float64
+	var signals string
+	for rows.Next() {
+		count++
+		if err := rows.Scan(&id, &noiseScore, &signals); err != nil {
+			t.Fatalf("scan score: %v", err)
+		}
 	}
-	if got[0].NoiseScore != 70 {
-		t.Errorf("noise_score = %v, want 70", got[0].NoiseScore)
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
 	}
-	if got[0].Signals["flap_rate"] != 0.4 {
-		t.Errorf("signals not round-tripped: %v", got[0].Signals)
+	if count != 1 {
+		t.Fatalf("got %d score rows, want 1", count)
+	}
+	if noiseScore != 70 {
+		t.Errorf("noise_score = %v, want 70", noiseScore)
+	}
+	if !strings.Contains(signals, `"flap_rate":0.4`) {
+		t.Errorf("signals not round-tripped: %v", signals)
 	}
 }
 

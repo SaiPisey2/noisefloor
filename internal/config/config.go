@@ -34,6 +34,9 @@ type Alertmanager struct {
 }
 
 type Rules struct {
+	// Path is reserved for issue #8 (PR-per-rule bot), which needs to locate
+	// the rule file a proposed change targets in order to open a PR against
+	// it. Unused today.
 	Path string `yaml:"path"`
 }
 

@@ -21,7 +21,6 @@ type AlertingRule struct {
 	For         time.Duration
 	Labels      map[string]string
 	Annotations map[string]string
-	Health      string
 }
 
 type RuleGroup struct {
@@ -93,7 +92,6 @@ func (a *API) Rules(ctx context.Context) ([]RuleGroup, error) {
 				For:         time.Duration(ar.Duration) * time.Second,
 				Labels:      labelSetToMap(ar.Labels),
 				Annotations: labelSetToMap(ar.Annotations),
-				Health:      string(ar.Health),
 			})
 		}
 		out = append(out, rg)

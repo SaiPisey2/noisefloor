@@ -105,8 +105,8 @@ func ObservedWindow(s Signals, r store.Rule, scanWindow time.Duration, now time.
 }
 
 // Confidence reports how much the evidence is worth, independent of how bad it
-// looks. It is the weaker of two sufficiency measures: enough episodes, and
-// enough observed time.
+// looks. It is the weaker of two sufficiency measures -- enough episodes, and
+// enough observed time -- discounted by how concentrated those episodes are.
 func Confidence(s Signals, window time.Duration, c config.Confidence) float64 {
 	if c.MinEpisodes < 1 {
 		c.MinEpisodes = 1
@@ -117,7 +117,32 @@ func Confidence(s Signals, window time.Duration, c config.Confidence) float64 {
 	if min := c.MinWindow.Std(); min > 0 {
 		windowScore = math.Min(1, float64(window)/float64(min))
 	}
-	return math.Min(episodes, windowScore)
+	base := math.Min(episodes, windowScore)
+
+	return base * fingerprintDiversityFactor(s)
+}
+
+// fingerprintDiversityFactor discounts confidence for fires concentrated on
+// very few series. A rule stuck flapping on one host produced `fires`
+// episodes but really only ever observed ONE thing behaving badly; the same
+// fire count spread across many distinct series sampled the failure mode
+// repeatedly and independently, which is stronger evidence for the same
+// count. See docs/noisefloor-design.md, which lists unique_fingerprints as a
+// confidence-only input.
+//
+// The discount is deliberately modest -- a factor between 0.8 and 1.0 -- for
+// two reasons: concentration is also a legitimate pattern (a rule watching
+// one global resource has nothing to spread across, and that is not weaker
+// evidence about IT), and it is already reported on its own as the
+// `concentration` signal, which routes a verdict rather than gating it. This
+// only discounts confidence; it never zeroes it, so min_episodes and
+// min_window remain the hard floors.
+func fingerprintDiversityFactor(s Signals) float64 {
+	if s.Fires == 0 {
+		return 1
+	}
+	diversity := float64(s.UniqueFingerprints) / float64(s.Fires)
+	return 0.8 + 0.2*diversity
 }
 
 // Verdict decides what to do about a rule.

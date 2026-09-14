@@ -49,10 +49,17 @@ const (
 )
 
 type Signals struct {
-	Fires              int
+	Fires int
+
+	// UniqueFingerprints is a confidence input: see Confidence in verdict.go,
+	// which discounts confidence for fires concentrated on very few series.
 	UniqueFingerprints int
 	P50Duration        time.Duration
-	P90Duration        time.Duration
+
+	// P90Duration is reserved for issue #9 (counterfactual computation:
+	// estimating how a proposed threshold or for: change would have affected
+	// past episodes). Computed and stored today; not yet read.
+	P90Duration time.Duration
 
 	// FirstEpisode is when this rule's earliest firing episode in the window
 	// started, or zero if it never fired. It is a confidence-only input, not a

@@ -4,17 +4,22 @@ import "time"
 
 const (
 	SourceBackfill = "backfill"
-	SourceWebhook  = "webhook"
+	// SourceWebhook is reserved for issue #13 (webhook-based episode
+	// ingestion, as an alternative to range-querying ALERTS). Unused today.
+	SourceWebhook = "webhook"
 
 	StateFiring  = "firing"
 	StatePending = "pending"
 )
 
 type Rule struct {
-	ID          int64
-	AlertName   string
-	GroupName   string
-	File        string
+	ID        int64
+	AlertName string
+	GroupName string
+	File      string
+	// Line is reserved for issue #8 (PR-per-rule bot), which needs to locate
+	// the exact line of the rule file a proposed change targets. Always zero
+	// today: nothing in the collection path sets it.
 	Line        int
 	Expr        string
 	ExprHash    string

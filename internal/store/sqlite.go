@@ -47,6 +47,7 @@ func fromUnix(v int64) time.Time {
 	}
 	return time.Unix(v, 0).UTC()
 }
+
 // toJSON marshals v for a NOT NULL TEXT column. Every caller passes a plain
 // map or slice of JSON-safe primitives -- rule labels/annotations, episode
 // labels, silence matchers, or the scored signals map -- none of which
@@ -234,17 +235,6 @@ func (s *SQLite) scanEpisodes(rows *sql.Rows) ([]Episode, error) {
 const episodeCols = `id, rule_id, fingerprint, labels, started_at, ended_at,
                      resolution_seconds, source, state`
 
-func (s *SQLite) ListEpisodes(ctx context.Context, ruleID int64, from, to time.Time) ([]Episode, error) {
-	q := `SELECT ` + episodeCols + ` FROM episodes
-	      WHERE rule_id = ? AND started_at >= ? AND started_at < ?
-	      ORDER BY started_at`
-	rows, err := s.db.QueryContext(ctx, q, ruleID, unix(from), unix(to))
-	if err != nil {
-		return nil, fmt.Errorf("list episodes: %w", err)
-	}
-	return s.scanEpisodes(rows)
-}
-
 func (s *SQLite) ListEpisodesInWindow(ctx context.Context, from, to time.Time) ([]Episode, error) {
 	q := `SELECT ` + episodeCols + ` FROM episodes
 	      WHERE started_at >= ? AND started_at < ?
@@ -323,54 +313,6 @@ ON CONFLICT (rule_id, window_start, window_end) DO UPDATE SET
 		toJSON(sc.Signals), sc.NoiseScore, sc.Verdict, sc.Confidence, unix(sc.ComputedAt))
 	if err != nil {
 		return fmt.Errorf("upsert score for rule %d: %w", sc.RuleID, err)
-	}
-	return nil
-}
-
-func (s *SQLite) ListScores(ctx context.Context, windowEnd time.Time) ([]Score, error) {
-	const q = `
-SELECT rule_id, window_start, window_end, signals, noise_score, verdict,
-       confidence, computed_at
-FROM scores WHERE window_end = ? ORDER BY noise_score DESC`
-	rows, err := s.db.QueryContext(ctx, q, unix(windowEnd))
-	if err != nil {
-		return nil, fmt.Errorf("list scores: %w", err)
-	}
-	defer rows.Close()
-
-	var out []Score
-	for rows.Next() {
-		var sc Score
-		var signals string
-		var ws, we, ca int64
-		if err := rows.Scan(&sc.RuleID, &ws, &we, &signals, &sc.NoiseScore,
-			&sc.Verdict, &sc.Confidence, &ca); err != nil {
-			return nil, fmt.Errorf("scan score: %w", err)
-		}
-		sc.Signals = map[string]float64{}
-		_ = json.Unmarshal([]byte(signals), &sc.Signals)
-		sc.WindowStart = fromUnix(ws)
-		sc.WindowEnd = fromUnix(we)
-		sc.ComputedAt = fromUnix(ca)
-		out = append(out, sc)
-	}
-	return out, rows.Err()
-}
-
-func (s *SQLite) Meta(ctx context.Context, key string) (string, error) {
-	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
-	if err != nil {
-		return "", fmt.Errorf("meta %q: %w", key, err)
-	}
-	return v, nil
-}
-
-func (s *SQLite) SetMeta(ctx context.Context, key, value string) error {
-	const q = `INSERT INTO meta (key, value) VALUES (?,?)
-	           ON CONFLICT (key) DO UPDATE SET value = excluded.value`
-	if _, err := s.db.ExecContext(ctx, q, key, value); err != nil {
-		return fmt.Errorf("set meta %q: %w", key, err)
 	}
 	return nil
 }
