@@ -445,9 +445,18 @@ func TestRunHandlesQueryRangeEndpointOverlap(t *testing.T) {
 			len(fs.episodes))
 	}
 	got := fs.episodes[0].Duration()
-	if got < 11*time.Hour || got > 13*time.Hour {
-		t.Errorf("stitched duration = %v, want close to 12h; a duplicated "+
-			"boundary sample must not inflate duration", got)
+	// BuildIntervals pads the tail by one step, since a sample at t only
+	// means the alert was observed firing at t and stopped somewhere in
+	// (t, t+step] — so the true expected duration is the 12h window plus one
+	// step, not the window alone. Asserting the exact value, rather than a
+	// wide band, is what actually catches inflation from the duplicated
+	// boundary sample: a wide band would let a spurious extra step slip
+	// through undetected.
+	want := 12*time.Hour + step
+	if got != want {
+		t.Errorf("stitched duration = %v, want exactly %v; a duplicated "+
+			"boundary sample must not inflate duration beyond the one-step "+
+			"tail padding BuildIntervals always adds", got, want)
 	}
 }
 
@@ -478,18 +487,24 @@ func TestFakeStoreRuleIDByAlertNameSeesUpsertedRule(t *testing.T) {
 
 func TestRunRejectsNonPositiveChunk(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
+	from, to := now.Add(-24*time.Hour), now
 
 	for _, bad := range []time.Duration{0, -time.Hour} {
 		cfg := testConfig()
 		cfg.Prometheus.Chunk = config.Duration(bad)
 
 		p := &fakeProm{floor: now.Add(-30 * 24 * time.Hour)}
-		_, err := New(p, newFakeStore(), cfg).Run(context.Background(), now.Add(-24*time.Hour), now)
+		res, err := New(p, newFakeStore(), cfg).Run(context.Background(), from, to)
 		if err == nil {
 			t.Errorf("chunk %v accepted; the chunk loop would never advance", bad)
 		}
 		if len(p.calls) != 0 {
 			t.Errorf("chunk %v queried Prometheus %d times before failing", bad, len(p.calls))
+		}
+		if !res.WindowStart.Equal(from) || !res.WindowEnd.Equal(to) {
+			t.Errorf("chunk %v returned window %v..%v, want the requested %v..%v; "+
+				"Run documents its result as partial but never zero",
+				bad, res.WindowStart, res.WindowEnd, from, to)
 		}
 	}
 }

@@ -64,6 +64,9 @@ type seriesKey struct {
 	fingerprint string
 }
 
+// Run backfills episodes for [from, to), clamped to what Prometheus can
+// still answer for.
+//
 // PRECONDITION: the rules collector must have run first. Run attaches episodes
 // to rules by alert name; if it runs first, a currently-defined alert gets an
 // orphan row under an empty group, the collector then inserts the real rule
@@ -72,15 +75,16 @@ type seriesKey struct {
 //
 // On error the returned BackfillResult is partial but never zero: it describes
 // what had been done when the error occurred.
-//
-// Run backfills episodes for [from, to), clamped to what Prometheus can
-// still answer for.
 func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResult, error) {
 	if b.cfg.Prometheus.Chunk.Std() <= 0 {
 		// A non-positive chunk makes the loop below never advance.
 		// config.Validate rejects it, but New accepts an unvalidated Config.
-		return BackfillResult{}, fmt.Errorf("prometheus.chunk must be positive, got %v",
-			b.cfg.Prometheus.Chunk)
+		//
+		// Returns the requested window rather than a zero value, per the
+		// partial-but-never-zero contract above: nothing has been done yet,
+		// so the window is the only thing worth reporting.
+		return BackfillResult{WindowStart: from, WindowEnd: to},
+			fmt.Errorf("prometheus.chunk must be positive, got %v", b.cfg.Prometheus.Chunk)
 	}
 
 	res := BackfillResult{WindowStart: from, WindowEnd: to}
