@@ -135,8 +135,14 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 	if got := verdicts["DemoFlapping"]; got != score.VerdictTune {
 		t.Errorf("DemoFlapping verdict = %q, want tune", got)
 	}
-	if got := verdicts["DemoSustained"]; got == score.VerdictRetire {
-		t.Error("DemoSustained must never be retired; it is the healthy control")
+	// DemoSustained is the project's ONLY fixture exercising the automate arm
+	// (automateMinFires / automateMaxShort / automateMinDuration). This build
+	// tag never runs in CI, so weakening this to `!= retire` would leave that
+	// arm with zero automated regression coverage anywhere.
+	if got := verdicts["DemoSustained"]; got != score.VerdictAutomate {
+		t.Errorf("DemoSustained verdict = %q, want automate; it is real, "+
+			"frequent and long-running without self-resolving (signals: %+v)",
+			got, signals["DemoSustained"])
 	}
 	if _, scored := verdicts["DemoQuiet"]; scored {
 		t.Error("DemoQuiet never fires and must not appear in results")

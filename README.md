@@ -82,17 +82,21 @@ not appear at all.
 
 ## Verdicts
 
-- `retire` -- self-resolving and silenced. Nobody acts on it.
-- `tune` -- flapping or concentrated on a few series. The threshold or `for:` is
-  wrong, not the rule.
+- `retire` -- the weighted noise score crosses the threshold, most often
+  because the rule self-resolves before anyone can act. Silence is one of the
+  five contributing signals, not a precondition -- DemoCauseA-D above reach
+  `retire` at 0% silenced, driven by SHORT and COFIRE instead.
+- `tune` -- flapping, concentrated on a few series, or sitting so close to its
+  threshold that it keeps almost firing (pending churn). The threshold or
+  `for:` is wrong, not the rule.
 - `automate` -- real, frequent and long-running. A runbook candidate.
 - `keep` -- fine, or not enough evidence to say otherwise.
 
 ## Configuration
 
-`noisefloor init` writes a commented `noisefloor.yaml`. The scoring weights are
-in it and are meant to be edited; there is no model, just a weighted sum you can
-read.
+`noisefloor init` writes a starter `noisefloor.yaml` with the scoring weights
+spelled out. They are meant to be edited; there is no model, just a weighted
+sum you can read.
 
 ## Demo
 
