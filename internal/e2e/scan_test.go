@@ -54,7 +54,7 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 		t.Fatalf("rules, is the demo stack up: %v", err)
 	}
 	now := time.Now().UTC()
-	if _, err := collect.SyncRules(ctx, groups, db, now); err != nil {
+	if _, err := collect.SyncRules(ctx, groups, db, now, cfg.Rules.MaxDeactivatedFraction); err != nil {
 		t.Fatalf("sync rules: %v", err)
 	}
 

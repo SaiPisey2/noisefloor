@@ -38,6 +38,21 @@ type Rules struct {
 	// the rule file a proposed change targets in order to open a PR against
 	// it. Unused today.
 	Path string `yaml:"path"`
+
+	// MaxDeactivatedFraction guards against a broken rule file being mistaken
+	// for a deliberate cleanup. Prometheus reporting fewer alerting rules than
+	// the store remembers as active is ambiguous on its own: it is what BOTH
+	// "someone deleted some rules" and "a rule file stopped parsing this
+	// morning" look like from here. Above this fraction of previously active
+	// rules disappearing in a single run, SyncRules refuses to deactivate them
+	// rather than silently emptying the report.
+	//
+	// 0.2 is chosen to catch the reported failure mode directly: one rule file
+	// out of a handful failing to load is a sudden, meaningfully large slice
+	// of the active set, while an operator pruning one or two noisy rules out
+	// of a normal-sized rule set stays comfortably under it. A team that does
+	// large, deliberate rule-set prunings in one sitting should raise this.
+	MaxDeactivatedFraction float64 `yaml:"max_deactivated_fraction"`
 }
 
 // Weights are the scored signals only. Verdict-only and confidence-only
@@ -86,6 +101,9 @@ func Default() Config {
 			MinEpisodes: 10,
 			MinWindow:   Duration(14 * 24 * time.Hour),
 		},
+		Rules: Rules{
+			MaxDeactivatedFraction: 0.2,
+		},
 	}
 }
 
@@ -126,6 +144,10 @@ func (c Config) Validate() error {
 	}
 	if c.Confidence.MinEpisodes < 1 {
 		return fmt.Errorf("confidence.min_episodes must be >= 1")
+	}
+	if c.Rules.MaxDeactivatedFraction <= 0 || c.Rules.MaxDeactivatedFraction > 1 {
+		return fmt.Errorf("rules.max_deactivated_fraction must be in (0, 1], got %v",
+			c.Rules.MaxDeactivatedFraction)
 	}
 	if _, err := time.LoadLocation(c.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q: %w", c.Timezone, err)

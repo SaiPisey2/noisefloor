@@ -206,6 +206,12 @@ and deliberately healthy alerts, then seeds 30 days of history.
 - If Alertmanager is unreachable, `silenced_rate` falls back to whatever the
   store already holds from an earlier scan -- it does not read as zero unless
   the store has nothing either.
+- If more than `rules.max_deactivated_fraction` (default 0.2) of previously
+  active rules are missing from a run, the scan refuses rather than
+  deactivating them, and names which ones -- a rule file that stopped parsing
+  should stop the scan, not quietly empty the report. A smaller drop proceeds
+  normally, with the missing rules printed to stderr so routine cleanup is
+  still visible.
 
 ## License
 

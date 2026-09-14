@@ -63,6 +63,13 @@ weights:
 confidence:
   min_episodes: 10
   min_window: 14d
+
+# Guards against a broken rule file being mistaken for a deliberate cleanup.
+# Above this fraction of previously active rules disappearing from Prometheus
+# in one run, the scan refuses to deactivate them and names the missing rules
+# instead of silently shrinking the report.
+rules:
+  max_deactivated_fraction: 0.2
 `
 
 func main() {
@@ -157,9 +164,28 @@ func runScan(args []string) error {
 		return err
 	}
 	now := time.Now().UTC()
-	ruleSync, err := collect.SyncRules(ctx, groups, db, now)
+	ruleSync, err := collect.SyncRules(ctx, groups, db, now, cfg.Rules.MaxDeactivatedFraction)
 	if err != nil {
 		return err
+	}
+
+	// A bare deactivation count cannot tell an operator "rules I deleted on
+	// purpose" from "a rule file that stopped parsing this morning" -- name
+	// them, grouped by rule group, so a real emergency is recognisable at a
+	// glance instead of looking like routine cleanup. (Already sorted by group
+	// then name.)
+	if len(ruleSync.DeactivatedRules) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"warning: %d rule(s) deactivated this run (active before, no longer "+
+				"reported by prometheus):\n", len(ruleSync.DeactivatedRules))
+		var curGroup string
+		for _, d := range ruleSync.DeactivatedRules {
+			if d.GroupName != curGroup {
+				fmt.Fprintf(os.Stderr, "  %s:\n", d.GroupName)
+				curGroup = d.GroupName
+			}
+			fmt.Fprintf(os.Stderr, "    - %s\n", d.AlertName)
+		}
 	}
 
 	// An alert name defined by two groups cannot be attributed: the ALERTS
