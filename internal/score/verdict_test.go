@@ -147,3 +147,63 @@ func TestEvaluateReturnsAllThree(t *testing.T) {
 		t.Errorf("verdict = %q, want %q", verdict, VerdictRetire)
 	}
 }
+
+func TestVerdictAutomatesDespiteConcentration(t *testing.T) {
+	// A concentrated but low-noise rule that is frequent, long-running and not
+	// self-resolving still reaches `automate`. Concentration is evidence about
+	// WHERE the fires come from, not a reason to withhold a runbook.
+	s := confident(Signals{
+		ShortLivedRate: 0.1, SilencedRate: 0.1, Concentration: 0.8,
+		P50Duration: 20 * time.Minute,
+	})
+	noise := NoiseScore(s, defaultWeights())
+	if noise >= noisyThreshold {
+		t.Fatalf("fixture noise %.1f is not below the threshold; the test no "+
+			"longer exercises the quiet-but-concentrated path", noise)
+	}
+	if got := Verdict(s, noise, 1.0); got != VerdictAutomate {
+		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictAutomate, noise)
+	}
+}
+
+func TestVerdictBoundariesAreInclusive(t *testing.T) {
+	// Every threshold below is documented as inclusive. Nothing else in the
+	// suite exercises the exact values, so flipping any >= to > would pass.
+	base := Signals{Fires: 100, UniqueFingerprints: 5}
+
+	t.Run("confidence exactly at the gate", func(t *testing.T) {
+		s := base
+		s.ShortLivedRate, s.SilencedRate = 0.9, 0.5
+		noise := NoiseScore(s, defaultWeights())
+		if got := Verdict(s, noise, minConfidence); got == VerdictKeep {
+			t.Errorf("confidence exactly %.2f was gated to keep; the gate is "+
+				"documented as allowing it through", minConfidence)
+		}
+	})
+
+	t.Run("noise exactly at the threshold", func(t *testing.T) {
+		s := base
+		if got := Verdict(s, noisyThreshold, 1.0); got != VerdictRetire {
+			t.Errorf("noise exactly %.0f gave %q, want %q",
+				float64(noisyThreshold), got, VerdictRetire)
+		}
+	})
+
+	t.Run("flap rate exactly at the tune threshold", func(t *testing.T) {
+		s := base
+		s.FlapRate = flapTuneThreshold
+		if got := Verdict(s, 10, 1.0); got != VerdictTune {
+			t.Errorf("flap rate exactly %.2f gave %q, want %q",
+				flapTuneThreshold, got, VerdictTune)
+		}
+	})
+
+	t.Run("fires exactly at the automate minimum", func(t *testing.T) {
+		s := Signals{Fires: automateMinFires, UniqueFingerprints: 2,
+			ShortLivedRate: 0.1, P50Duration: automateMinDuration}
+		if got := Verdict(s, 5, 1.0); got != VerdictAutomate {
+			t.Errorf("fires exactly %d with duration exactly %v gave %q, want %q",
+				automateMinFires, automateMinDuration, got, VerdictAutomate)
+		}
+	})
+}

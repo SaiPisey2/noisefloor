@@ -97,6 +97,11 @@ func Verdict(s Signals, noise, confidence float64) string {
 		return VerdictRetire
 	}
 
+	// Concentration and pending churn deliberately do NOT block this arm. A
+	// rule firing this often, this long, without self-resolving is a runbook
+	// candidate whatever the shape of its distribution -- concentration tells
+	// you where to aim the automation, not whether to write it. Both signals
+	// are reported alongside the verdict, so the operator sees the skew.
 	if s.Fires >= automateMinFires &&
 		s.ShortLivedRate < automateMaxShort &&
 		s.P50Duration >= automateMinDuration {
