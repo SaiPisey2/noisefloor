@@ -1,0 +1,50 @@
+# Each rule below is deliberately good or deliberately bad. The comment on
+# each states the verdict noisefloor is expected to reach, and the
+# integration test asserts it.
+groups:
+  - name: demo
+    interval: 15s
+    rules:
+      # Fires for 2m every 90m and resolves itself. Nobody acts on it.
+      # Expected verdict: retire, once a silence exists against it.
+      - alert: DemoSpiky
+        expr: demo_spiky_gauge > 0
+        labels: {severity: warning}
+        annotations: {summary: "Spiky signal breached"}
+
+      # 4m on, 4m off: short episodes that keep coming back.
+      # Expected verdict: tune.
+      - alert: DemoFlapping
+        expr: demo_flapping_gauge > 0
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "Flapping signal breached"}
+
+      # Fires once and stays firing. Expected verdict: keep.
+      - alert: DemoSustained
+        expr: demo_sustained_gauge > 0
+        for: 2m
+        labels: {severity: page}
+        annotations: {summary: "Sustained signal breached"}
+
+      # A through D always fire together: cause-based alerting.
+      # Four rules, not three: co-fire detection requires three OTHER rules
+      # firing alongside, so three rules would leave each one short.
+      # Expected: high cofire_ratio on all four.
+      - alert: DemoCauseA
+        expr: demo_cause_gauge{component="a"} > 0
+        labels: {severity: warning}
+      - alert: DemoCauseB
+        expr: demo_cause_gauge{component="b"} > 0
+        labels: {severity: warning}
+      - alert: DemoCauseC
+        expr: demo_cause_gauge{component="c"} > 0
+        labels: {severity: warning}
+      - alert: DemoCauseD
+        expr: demo_cause_gauge{component="d"} > 0
+        labels: {severity: warning}
+
+      # Never fires. Expected: present in rules, absent from scores.
+      - alert: DemoQuiet
+        expr: demo_quiet_gauge > 1
+        labels: {severity: warning}
