@@ -34,18 +34,21 @@ This is real output from the demo stack (`make demo-up && make demo-seed`),
 ```
 Window     2026-08-15 to 2026-09-14  (30d)
 Rules      8 active, 0 inactive
-Episodes   6712
+Episodes   6565
 Silences   0
 
 NOISE  CONF  VERDICT   GROUP  RULE           FIRES  SHORT  SILENCED  FLAP  COFIRE  CONC  NIGHT
-58     1.0   tune      demo   DemoFlapping   3862   100%   0%        100%  7%      0%    73%
-52     1.0   retire    demo   DemoCauseA      596   100%   0%        0%    100%    0%    73%
-52     1.0   retire    demo   DemoCauseB      596   100%   0%        0%    100%    0%    73%
-52     1.0   retire    demo   DemoCauseC      596   100%   0%        0%    100%    0%    73%
-52     1.0   retire    demo   DemoCauseD      596   100%   0%        0%    100%    0%    73%
-38     1.0   retire    demo   DemoSpiky       437   100%   0%        0%    7%      0%    73%
- 9     1.0   automate  demo   DemoSustained    29     0%   0%        0%    7%      0%    79%
+58     1.0   tune      demo   DemoFlapping   3776   100%   0%        100%  7%      0%    73%
+52     1.0   retire    demo   DemoCauseA     583    100%   0%        0%    100%    0%    72%
+52     1.0   retire    demo   DemoCauseB     583    100%   0%        0%    100%    0%    72%
+52     1.0   retire    demo   DemoCauseC     583    100%   0%        0%    100%    0%    72%
+52     1.0   retire    demo   DemoCauseD     583    100%   0%        0%    100%    0%    72%
+38     1.0   retire    demo   DemoSpiky      428    100%   0%        0%    7%      0%    73%
+9      1.0   automate  demo   DemoSustained  29     0%     0%        0%    7%      0%    76%
 ```
+
+This is the output of `make demo-up && make demo-seed && noisefloor scan`;
+exact counts shift slightly between runs as the seeded window slides.
 
 `DemoFlapping` re-fires constantly on the same series (`tune`). `DemoCauseA`
 through `DemoCauseD` always fire together, alongside whatever they are a
@@ -61,15 +64,21 @@ not appear at all.
 - **CONF** -- how much the evidence is worth, separately from how bad it looks. A
   rule that fired three times can score terribly and mean nothing, so below 0.5
   the verdict is always `keep`.
+- **VERDICT** -- see Verdicts below.
+- **GROUP** / **RULE** -- the Prometheus rule group and alert name this row
+  scores.
+- **FIRES** -- episodes counted in the window.
 - **SHORT** -- episodes that resolved themselves before anyone could act.
 - **SILENCED** -- firing time a human had explicitly silenced.
 - **FLAP** -- re-fires on the same series within an hour.
 - **COFIRE** -- episodes that started alongside three or more other rules, which
   is what a cause-based alert riding someone else's incident looks like.
-- **CONC** -- how concentrated firings are on a small number of series, and
-  **NIGHT** -- the off-hours share. Both are shown because they can pull a
-  noisy rule toward `tune` instead of `retire`; the table would otherwise show
-  a verdict it can't justify.
+- **CONC** -- concentration: how much of the firing time sits on a small
+  number of series. Not part of the weighted NOISE sum, but shown because it
+  can route a noisy rule to `tune` instead of `retire`; the table would
+  otherwise show a verdict it can't justify.
+- **NIGHT** -- share of fires outside weekday working hours. This is the fifth
+  weighted signal behind NOISE (`offhours_rate`).
 
 ## Verdicts
 
