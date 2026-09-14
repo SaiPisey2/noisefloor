@@ -22,10 +22,13 @@ demo-down:
 demo-logs:
 	docker-compose -f demo/docker-compose.yml logs -f
 
+# ./... rather than ./demo/...: the end-to-end scan test lives in internal/e2e,
+# and a target scoped to ./demo/... silently ran none of it.
+#
 # -count=1 is mandatory, not decorative: without it Go's test cache can return
 # a PASS for an integration target that never touched the running stack.
 integration:
-	go test ./demo/... -tags=integration -v -count=1
+	go test ./... -tags=integration -v -count=1
 
 .PHONY: demo-seed
 
