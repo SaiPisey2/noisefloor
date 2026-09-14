@@ -1,0 +1,149 @@
+package score
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/SaiPisey2/noisefloor/internal/config"
+)
+
+func defaultWeights() config.Weights { return config.Default().Weights }
+
+func defaultConfidence() config.Confidence { return config.Default().Confidence }
+
+// confident returns signals that clear the confidence floor, so verdict tests
+// exercise verdict logic rather than the confidence gate.
+func confident(s Signals) Signals {
+	s.Fires = 100
+	s.UniqueFingerprints = 5
+	return s
+}
+
+func TestNoiseScoreIsZeroForCleanRule(t *testing.T) {
+	if got := NoiseScore(Signals{}, defaultWeights()); got != 0 {
+		t.Errorf("noise = %v, want 0", got)
+	}
+}
+
+func TestNoiseScoreIsHundredForMaximallyNoisyRule(t *testing.T) {
+	s := Signals{
+		ShortLivedRate: 1, SilencedRate: 1, FlapRate: 1,
+		CofireRatio: 1, OffhoursRate: 1,
+	}
+	if got := NoiseScore(s, defaultWeights()); math.Abs(got-100) > 0.001 {
+		t.Errorf("noise = %v, want 100", got)
+	}
+}
+
+func TestNoiseScoreIgnoresUnweightedSignals(t *testing.T) {
+	s := Signals{Concentration: 1, PendingChurn: 1, P50Duration: time.Hour}
+	if got := NoiseScore(s, defaultWeights()); got != 0 {
+		t.Errorf("noise = %v, want 0; verdict-only signals must not move the score", got)
+	}
+}
+
+func TestNoiseScoreAppliesWeights(t *testing.T) {
+	s := Signals{ShortLivedRate: 1} // weight 0.30
+	if got := NoiseScore(s, defaultWeights()); math.Abs(got-30) > 0.001 {
+		t.Errorf("noise = %v, want 30", got)
+	}
+}
+
+func TestConfidenceGrowsWithEpisodes(t *testing.T) {
+	c := defaultConfidence() // min_episodes 10, min_window 14d
+	window := 30 * 24 * time.Hour
+
+	if got := Confidence(Signals{Fires: 0}, window, c); got != 0 {
+		t.Errorf("confidence with 0 fires = %v, want 0", got)
+	}
+	if got := Confidence(Signals{Fires: 5}, window, c); math.Abs(got-0.5) > 0.001 {
+		t.Errorf("confidence with 5 fires = %v, want 0.5", got)
+	}
+	if got := Confidence(Signals{Fires: 50}, window, c); got != 1 {
+		t.Errorf("confidence with 50 fires = %v, want 1 (capped)", got)
+	}
+}
+
+func TestConfidenceIsLimitedByShortWindow(t *testing.T) {
+	c := defaultConfidence()
+	// Plenty of fires, but only 7 days observed against a 14 day minimum.
+	got := Confidence(Signals{Fires: 1000}, 7*24*time.Hour, c)
+	if math.Abs(got-0.5) > 0.001 {
+		t.Errorf("confidence = %v, want 0.5, limited by window", got)
+	}
+}
+
+func TestVerdictKeepsWhenConfidenceIsLow(t *testing.T) {
+	// Signals look terrible but only three episodes back them.
+	s := Signals{Fires: 3, ShortLivedRate: 1, SilencedRate: 1}
+	noise := NoiseScore(s, defaultWeights())
+	conf := Confidence(s, 30*24*time.Hour, defaultConfidence())
+
+	if got := Verdict(s, noise, conf); got != VerdictKeep {
+		t.Errorf("verdict = %q, want %q; thin data must never propose a deletion", got, VerdictKeep)
+	}
+}
+
+func TestVerdictRetiresSelfResolvingSilencedRule(t *testing.T) {
+	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5, P50Duration: time.Minute})
+	noise := NoiseScore(s, defaultWeights())
+	if got := Verdict(s, noise, 1.0); got != VerdictRetire {
+		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictRetire, noise)
+	}
+}
+
+func TestVerdictTunesFlappingRuleRatherThanRetiringIt(t *testing.T) {
+	// High noise, but the cause is flapping: the rule needs a longer for:,
+	// not deletion.
+	s := confident(Signals{ShortLivedRate: 0.9, FlapRate: 0.8, SilencedRate: 0.4})
+	noise := NoiseScore(s, defaultWeights())
+	if got := Verdict(s, noise, 1.0); got != VerdictTune {
+		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictTune, noise)
+	}
+}
+
+func TestVerdictTunesConcentratedRule(t *testing.T) {
+	// The noise must clear noisyThreshold for this test to say anything about
+	// concentration. Below it the correct verdict is `keep` regardless: a rule
+	// nobody is suffering under does not need tuning just because its fires
+	// happen to land on one host.
+	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5, Concentration: 0.8})
+	noise := NoiseScore(s, defaultWeights())
+	if got := Verdict(s, noise, 1.0); got != VerdictTune {
+		t.Errorf("verdict = %q, want %q", got, VerdictTune)
+	}
+}
+
+func TestVerdictAutomatesFrequentRealAlerts(t *testing.T) {
+	s := confident(Signals{ShortLivedRate: 0.05, P50Duration: 40 * time.Minute})
+	noise := NoiseScore(s, defaultWeights())
+	if got := Verdict(s, noise, 1.0); got != VerdictAutomate {
+		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictAutomate, noise)
+	}
+}
+
+func TestVerdictKeepsHealthyRule(t *testing.T) {
+	s := confident(Signals{ShortLivedRate: 0.1, P50Duration: 5 * time.Minute})
+	s.Fires = 12
+	noise := NoiseScore(s, defaultWeights())
+	if got := Verdict(s, noise, 1.0); got != VerdictKeep {
+		t.Errorf("verdict = %q, want %q (noise %.1f)", got, VerdictKeep, noise)
+	}
+}
+
+func TestEvaluateReturnsAllThree(t *testing.T) {
+	cfg := config.Default()
+	s := confident(Signals{ShortLivedRate: 0.9, SilencedRate: 0.5})
+
+	noise, conf, verdict := Evaluate(s, 30*24*time.Hour, cfg)
+	if noise <= 0 {
+		t.Errorf("noise = %v, want > 0", noise)
+	}
+	if conf != 1 {
+		t.Errorf("confidence = %v, want 1", conf)
+	}
+	if verdict != VerdictRetire {
+		t.Errorf("verdict = %q, want %q", verdict, VerdictRetire)
+	}
+}
