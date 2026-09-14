@@ -80,6 +80,7 @@ func TestRenderIncludesEvidenceColumns(t *testing.T) {
 func TestRenderShowsSilencesUnavailable(t *testing.T) {
 	meta := testMeta()
 	meta.SilencesAvailable = false
+	meta.Silences = 0
 
 	var sb strings.Builder
 	if err := Render(&sb, nil, meta); err != nil {
@@ -91,6 +92,28 @@ func TestRenderShowsSilencesUnavailable(t *testing.T) {
 	}
 	if strings.Contains(out, "Silences   4") {
 		t.Error("must not print a silence count when the signal was unavailable")
+	}
+}
+
+// TestRenderShowsStoredSilencesWhenAlertmanagerUnavailable guards the state
+// that was previously misreported: Alertmanager is down, but the store still
+// holds silences from an earlier scan, so silenced_rate is NOT necessarily
+// zero and the report must not claim it is unavailable outright.
+func TestRenderShowsStoredSilencesWhenAlertmanagerUnavailable(t *testing.T) {
+	meta := testMeta()
+	meta.SilencesAvailable = false
+	meta.Silences = 4
+
+	var sb strings.Builder
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "Silences   4 (from store; alertmanager unavailable, newer silences may be missing)") {
+		t.Errorf("stored silences during an outage must say so, not claim they are unavailable, got:\n%s", out)
+	}
+	if strings.Contains(out, "unavailable (silenced_rate reads 0 for every rule)") {
+		t.Error("must not claim silenced_rate reads 0 when the store still holds silences")
 	}
 }
 

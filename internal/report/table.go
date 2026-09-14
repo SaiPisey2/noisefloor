@@ -54,9 +54,17 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 	}
 	fmt.Fprintf(w, "Rules      %d active, %d inactive\n", meta.RulesActive, meta.RulesInactive)
 	fmt.Fprintf(w, "Episodes   %d\n", meta.Episodes)
-	if meta.SilencesAvailable {
+	// Three distinct states, and conflating them misreports the score. When
+	// Alertmanager is unreachable the store may still hold silences observed by
+	// an earlier scan -- which is exactly why they are persisted -- so
+	// silenced_rate is NOT necessarily zero, and saying otherwise is false.
+	switch {
+	case meta.SilencesAvailable:
 		fmt.Fprintf(w, "Silences   %d\n\n", meta.Silences)
-	} else {
+	case meta.Silences > 0:
+		fmt.Fprintf(w, "Silences   %d (from store; alertmanager unavailable, "+
+			"newer silences may be missing)\n\n", meta.Silences)
+	default:
 		fmt.Fprintf(w, "Silences   unavailable (silenced_rate reads 0 for every rule)\n\n")
 	}
 
