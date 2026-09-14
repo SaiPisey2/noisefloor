@@ -16,6 +16,12 @@ type FakeProvider struct {
 	Branches map[string]string
 	// Files maps "owner/repo/branch/path" to its committed content.
 	Files map[string]string
+	// BaseFiles maps "owner/repo/path" to the file's content on the base
+	// branch. A branch with no committed file of its own inherits this, the
+	// same way a branch cut from base HEAD does. Set it to something other
+	// than what the local checkout holds to exercise CommitFiles' refusal to
+	// overwrite a remote that has moved on.
+	BaseFiles map[string]string
 	// PRs maps "owner/repo/branch" to the PR opened for it, open or not.
 	PRs map[string]*PullRequest
 
@@ -33,6 +39,7 @@ func NewFakeProvider() *FakeProvider {
 	return &FakeProvider{
 		Branches:   map[string]string{},
 		Files:      map[string]string{},
+		BaseFiles:  map[string]string{},
 		PRs:        map[string]*PullRequest{},
 		nextNumber: 1,
 	}
@@ -46,11 +53,11 @@ func key(parts ...string) string {
 	return s
 }
 
-func (f *FakeProvider) FindOpenPR(_ context.Context, owner, repo, _, branch string) (*PullRequest, error) {
+func (f *FakeProvider) FindPR(_ context.Context, owner, repo, _, branch string) (*PullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pr, ok := f.PRs[key(owner, repo, branch)]
-	if !ok || pr.State != "open" {
+	if !ok {
 		return nil, nil
 	}
 	cp := *pr
@@ -71,7 +78,16 @@ func (f *FakeProvider) EnsureBranch(_ context.Context, owner, repo, branch, base
 	return nil
 }
 
-func (f *FakeProvider) CommitFiles(_ context.Context, owner, repo, branch string, changes []FileChange) error {
+// CommitFiles enforces the same base-content precondition GitHubProvider
+// does, because a fake that accepts a write a real provider would refuse
+// makes every test built on it prove the wrong thing.
+//
+// The file it compares against is whatever the branch already holds, or --
+// for a branch that has never been committed to, exactly like one just cut
+// from base HEAD -- BaseFiles. A test that leaves BaseFiles empty is
+// describing a remote whose file matches the local checkout, which is the
+// ordinary case.
+func (f *FakeProvider) CommitFiles(_ context.Context, owner, repo, base, branch string, changes []FileChange) error {
 	if f.FailCommit != nil {
 		return f.FailCommit
 	}
@@ -81,6 +97,19 @@ func (f *FakeProvider) CommitFiles(_ context.Context, owner, repo, branch string
 		return fmt.Errorf("commit to nonexistent branch %s", branch)
 	}
 	for _, c := range changes {
+		remote, committed := f.Files[key(owner, repo, branch, c.Path)]
+		if !committed {
+			remote, committed = f.BaseFiles[key(owner, repo, c.Path)]
+		}
+		if committed && remote != c.BaseContent {
+			return fmt.Errorf("refusing to commit %s to %s: the file there is not the one this "+
+				"edit was computed from (%d bytes remote, %d bytes locally)",
+				c.Path, branch, len(remote), len(c.BaseContent))
+		}
+		if baseContent, ok := f.BaseFiles[key(owner, repo, c.Path)]; ok && baseContent != c.BaseContent {
+			return fmt.Errorf("refusing to commit %s to %s: %s has moved on since this checkout",
+				c.Path, branch, base)
+		}
 		f.Files[key(owner, repo, branch, c.Path)] = c.Content
 	}
 	return nil

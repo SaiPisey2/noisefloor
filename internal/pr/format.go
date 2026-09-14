@@ -20,6 +20,10 @@ func WriteResult(w io.Writer, res RunResult, apply bool) {
 	for _, s := range res.Skipped {
 		skipped[s.Proposal.Branch] = s.PR
 	}
+	declined := map[string]*PullRequest{}
+	for _, d := range res.Declined {
+		declined[d.Proposal.Branch] = d.PR
+	}
 
 	for i, p := range res.Proposals {
 		if i > 0 {
@@ -41,6 +45,11 @@ func WriteResult(w io.Writer, res RunResult, apply bool) {
 			fmt.Fprintf(w, "opened: %s\n", opened[p.Branch].URL)
 		case skipped[p.Branch] != nil:
 			fmt.Fprintf(w, "already open: %s (no new PR opened)\n", skipped[p.Branch].URL)
+		case declined[p.Branch] != nil:
+			d := declined[p.Branch]
+			fmt.Fprintf(w, "not opened: PR #%d for this exact proposal was %s (%s). "+
+				"That is a decision, not a gap -- noisefloor will not reopen it. It will "+
+				"propose again only if the proposal itself changes.\n", d.Number, d.State, d.URL)
 		case apply:
 			fmt.Fprintf(w, "not opened (see error above)\n")
 		default:

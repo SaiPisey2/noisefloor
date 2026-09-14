@@ -22,6 +22,20 @@ type Skipped struct {
 	PR       *PullRequest
 }
 
+// Declined is one proposal whose branch already carries a CLOSED (or
+// merged) pull request.
+//
+// A closed PR is a person's answer to this exact proposal. Branch names are
+// deterministic per proposal, so the PR that was closed proposed the same
+// edit to the same rule; reopening it would be re-asking a question that
+// has been answered, on a schedule, in a repository the bot is a guest in.
+// The rule stays refused until the proposal itself changes -- which changes
+// the branch name, and legitimately earns a new PR.
+type Declined struct {
+	Proposal *Proposal
+	PR       *PullRequest
+}
+
 // RunResult is everything one Run produced, across every rule evaluated.
 type RunResult struct {
 	// Proposals is every rule that would get a PR, rendered (diff and new
@@ -33,6 +47,9 @@ type RunResult struct {
 	Opened []Opened
 	// Skipped is the subset that already had an open PR on their branch.
 	Skipped []Skipped
+	// Declined is the subset whose branch already carries a closed or merged
+	// PR -- a decision already taken, not repeated.
+	Declined []Declined
 	// Refusals is every rule Build declined to propose a change for, with
 	// why.
 	Refusals []Refusal
@@ -79,12 +96,19 @@ func Run(ctx context.Context, provider Provider, evals []scanner.RuleEval, opt R
 		}
 		res.Proposals = append(res.Proposals, proposal)
 
-		existing, err := provider.FindOpenPR(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch)
+		existing, err := provider.FindPR(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch)
 		if err != nil {
 			return res, fmt.Errorf("%s/%s: check existing PR: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
 		}
-		if existing != nil {
+		switch {
+		case existing == nil:
+			// No PR has ever been opened for this proposal. Carry on.
+		case existing.State == "open":
 			res.Skipped = append(res.Skipped, Skipped{Proposal: proposal, PR: existing})
+			continue
+		default:
+			// Closed or merged: somebody already decided. See Declined.
+			res.Declined = append(res.Declined, Declined{Proposal: proposal, PR: existing})
 			continue
 		}
 		if !opt.Apply {
@@ -101,8 +125,11 @@ func Run(ctx context.Context, provider Provider, evals []scanner.RuleEval, opt R
 		if err := provider.EnsureBranch(ctx, opt.Owner, opt.Repo, proposal.Branch, opt.Base); err != nil {
 			return res, fmt.Errorf("%s/%s: ensure branch: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
 		}
-		if err := provider.CommitFiles(ctx, opt.Owner, opt.Repo, proposal.Branch, []FileChange{
-			{Path: relPath, Content: proposal.NewContent, Message: proposal.Title},
+		if err := provider.CommitFiles(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch, []FileChange{
+			{
+				Path: relPath, Content: proposal.NewContent,
+				BaseContent: proposal.BaseContent, Message: proposal.Title,
+			},
 		}); err != nil {
 			return res, fmt.Errorf("%s/%s: commit: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
 		}
