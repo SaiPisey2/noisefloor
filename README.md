@@ -173,3 +173,9 @@ and deliberately healthy alerts, then seeds 30 days of history.
 ## License
 
 Apache 2.0
+
+## Contributing
+
+Run `git config core.hooksPath .githooks` after cloning. The hooks reject
+commit messages carrying tool attribution, and CI enforces the same rule
+across the whole history.

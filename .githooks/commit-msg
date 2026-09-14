@@ -1,0 +1,10 @@
+#!/bin/sh
+# Reject any commit message revealing AI/tool involvement.
+# Instructing agents not to add these has already failed once; this makes it
+# impossible rather than merely requested.
+if grep -qiE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1"; then
+  echo "commit-msg hook: refusing commit — message contains AI/tool attribution." >&2
+  echo "Offending line(s):" >&2
+  grep -inE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1" >&2
+  exit 1
+fi

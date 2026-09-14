@@ -16,3 +16,18 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -race
       - run: CGO_ENABLED=0 go build ./cmd/noisefloor
+
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject AI attribution in commit messages
+        run: |
+          if git log --format='%H %B' | grep -iE 'co-authored-by.*(claude|anthropic|copilot)|generated with|\bclaude\b|\banthropic\b'; then
+            echo "commit history contains AI attribution" >&2
+            exit 1
+          fi
+          echo "history clean"
+
