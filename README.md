@@ -34,17 +34,17 @@ This is real output from the demo stack (`make demo-up && make demo-seed`),
 ```
 Window     2026-08-15 to 2026-09-14  (30d)
 Rules      8 active, 0 inactive
-Episodes   6565
+Episodes   6388
 Silences   0
 
 NOISE  CONF  VERDICT   GROUP  RULE           FIRES  SHORT  SILENCED  FLAP  COFIRE  CONC  NIGHT
-58     1.0   tune      demo   DemoFlapping   3776   100%   0%        100%  7%      0%    73%
-52     1.0   retire    demo   DemoCauseA     583    100%   0%        0%    100%    0%    72%
-52     1.0   retire    demo   DemoCauseB     583    100%   0%        0%    100%    0%    72%
-52     1.0   retire    demo   DemoCauseC     583    100%   0%        0%    100%    0%    72%
-52     1.0   retire    demo   DemoCauseD     583    100%   0%        0%    100%    0%    72%
-38     1.0   retire    demo   DemoSpiky      428    100%   0%        0%    7%      0%    73%
-9      1.0   automate  demo   DemoSustained  29     0%     0%        0%    7%      0%    76%
+51     1.0   tune      demo   DemoFlapping   3667   100%   0%        100%  7%      0%    1%
+45     1.0   retire    demo   DemoCauseA     567    100%   0%        0%    100%    0%    0%
+45     1.0   retire    demo   DemoCauseB     567    100%   0%        0%    100%    0%    0%
+45     1.0   retire    demo   DemoCauseC     567    100%   0%        0%    100%    0%    0%
+45     1.0   retire    demo   DemoCauseD     567    100%   0%        0%    100%    0%    0%
+31     1.0   retire    demo   DemoSpiky      418    100%   0%        0%    7%      0%    0%
+1      1.0   automate  demo   DemoSustained  28     0%     0%        0%    7%      0%    0%
 ```
 
 This is the output of `make demo-up && make demo-seed && noisefloor scan`;
@@ -58,12 +58,25 @@ periods, and stays `automate` -- never `retire` -- because it is the one rule
 in the set worth a runbook, not a deletion. `DemoQuiet` never fires and does
 not appear at all.
 
+NIGHT reads near zero for every demo rule because the seeded fires are spread
+evenly around the clock. That is the correct answer: the column measures
+*disproportionately* nocturnal firing, so a rule that pages as often at 3pm as
+at 3am scores 0 on it. See the column notes below.
+
 ## What the columns mean
 
 - **NOISE** -- 0 to 100, weighted from the five scored signals below.
 - **CONF** -- how much the evidence is worth, separately from how bad it looks. A
-  rule that fired three times can score terribly and mean nothing, so below 0.5
-  the verdict is always `keep`.
+  rule that fired three times can score terribly and mean nothing. Three things
+  have to hold before a rule gets any verdict but `keep`:
+  - at least `confidence.min_episodes` fires (default 10) -- the configured
+    number is a hard floor, not a ratio to be halved;
+  - `CONF` at or above 0.5, where `CONF` is
+    `min(fires / min_episodes, observed_window / min_window)`;
+  - an observed window long enough to matter. That window is bounded by how
+    long the rule has demonstrably existed -- the earlier of when noisefloor
+    first saw it and its own first episode -- so a rule added yesterday cannot
+    claim a month of observation however hard it fires today.
 - **VERDICT** -- see Verdicts below.
 - **GROUP** / **RULE** -- the Prometheus rule group and alert name this row
   scores.
@@ -77,15 +90,26 @@ not appear at all.
   number of series. Not part of the weighted NOISE sum, but shown because it
   can route a noisy rule to `tune` instead of `retire`; the table would
   otherwise show a verdict it can't justify.
-- **NIGHT** -- share of fires outside weekday working hours. This is the fifth
-  weighted signal behind NOISE (`offhours_rate`).
+- **NIGHT** -- how much *more* of this rule's firing lands outside weekday
+  09:00-18:00 than you would expect by chance. This is the fifth weighted
+  signal behind NOISE (`offhours_rate`).
+
+  The raw share is not useful on its own: 123 of the week's 168 hours are
+  outside those working hours, so any rule firing round the clock sits at 73%
+  and the number says nothing about the rule. NIGHT is that raw share rescaled
+  against the 73% baseline, so a uniformly-firing rule reads 0% and a rule that
+  only ever pages at night reads 100%. Hours are counted in the configured
+  `timezone`.
 
 ## Verdicts
 
-- `retire` -- the weighted noise score crosses the threshold, most often
+- `retire` -- the weighted noise score crosses the threshold (30), most often
   because the rule self-resolves before anyone can act. Silence is one of the
   five contributing signals, not a precondition -- DemoCauseA-D above reach
-  `retire` at 0% silenced, driven by SHORT and COFIRE instead.
+  `retire` at 0% silenced, driven by SHORT and COFIRE instead. 30 is where a
+  rule that ONLY ever self-resolves becomes actionable: `short_lived_rate`
+  alone carries 0.30 of the weight, so nothing else has to be wrong for that
+  to be worth saying.
 - `tune` -- flapping, concentrated on a few series, or sitting so close to its
   threshold that it keeps almost firing (pending churn). The threshold or
   `for:` is wrong, not the rule.
@@ -97,6 +121,11 @@ not appear at all.
 `noisefloor init` writes a starter `noisefloor.yaml` with the scoring weights
 spelled out. They are meant to be edited; there is no model, just a weighted
 sum you can read.
+
+`timezone` defaults to `UTC`, and deliberately not to `Local`: it decides which
+fires count as off-hours, which is a scored signal, so `Local` would let the
+same database produce different verdicts on a CET laptop and in a UTC CI
+container. Set your team's working timezone if it is not UTC.
 
 ## Demo
 
@@ -113,8 +142,16 @@ and deliberately healthy alerts, then seeds 30 days of history.
 
 - Episode precision is bounded by the query step; alerts shorter than one step
   are undercounted.
-- History is bounded by Prometheus retention, and the report says so when the
-  window was clipped.
+- History is bounded by Prometheus retention. The whole requested window is
+  always queried -- Prometheus simply returns nothing outside retention -- and
+  when the earliest episode found is well inside the window the report says
+  where data actually begins rather than guessing at the cause. Confidence is
+  then measured against the span that exists, not the span requested.
+- An alert name defined in more than one rule group is not scored, and the
+  report says how many were skipped. The `ALERTS` series records an alertname
+  but no group, so there is no way to tell whose episodes are whose; scoring
+  one rule on both histories would produce a confident verdict about the wrong
+  rule.
 - Rules that no longer exist keep their history but are never scored or
   proposed for change.
 - A rule whose expression changed inside the window is shown but not given a
