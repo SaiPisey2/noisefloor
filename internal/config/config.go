@@ -25,10 +25,12 @@ type Prometheus struct {
 	URL   string   `yaml:"url"`
 	Step  Duration `yaml:"step"`
 	Chunk Duration `yaml:"chunk"`
+	Auth  Auth     `yaml:"auth"`
 }
 
 type Alertmanager struct {
-	URL string `yaml:"url"`
+	URL  string `yaml:"url"`
+	Auth Auth   `yaml:"auth"`
 }
 
 type Rules struct {
@@ -124,6 +126,12 @@ func (c Config) Validate() error {
 	}
 	if _, err := time.LoadLocation(c.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q: %w", c.Timezone, err)
+	}
+	if err := c.Prometheus.Auth.Validate(); err != nil {
+		return fmt.Errorf("prometheus.auth: %w", err)
+	}
+	if err := c.Alertmanager.Auth.Validate(); err != nil {
+		return fmt.Errorf("alertmanager.auth: %w", err)
 	}
 	return nil
 }
