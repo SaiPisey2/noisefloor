@@ -1,4 +1,4 @@
-package main
+package scanner
 
 import (
 	"testing"
@@ -14,7 +14,7 @@ func TestScanWindowIsIdenticalWithinAStep(t *testing.T) {
 	window := 30 * 24 * time.Hour
 	base := time.Unix(1_700_000_000, 0).UTC().Truncate(step)
 
-	wantFrom, wantTo := scanWindow(base, window, step)
+	wantFrom, wantTo := ScanWindow(base, window, step)
 	if !wantTo.Equal(base) {
 		t.Fatalf("to = %v for an already-aligned instant, want %v unchanged", wantTo, base)
 	}
@@ -26,9 +26,9 @@ func TestScanWindowIsIdenticalWithinAStep(t *testing.T) {
 		time.Nanosecond, time.Second, 17 * time.Second,
 		30 * time.Second, step - time.Nanosecond,
 	} {
-		from, to := scanWindow(base.Add(offset), window, step)
+		from, to := ScanWindow(base.Add(offset), window, step)
 		if !from.Equal(wantFrom) || !to.Equal(wantTo) {
-			t.Errorf("scanWindow(base+%v) = %v..%v, want %v..%v; scans within one "+
+			t.Errorf("ScanWindow(base+%v) = %v..%v, want %v..%v; scans within one "+
 				"step must ask for the same window or the sample grid shifts and "+
 				"the same episodes get stored twice",
 				offset, from, to, wantFrom, wantTo)
@@ -44,8 +44,8 @@ func TestScanWindowAdvancesByAStep(t *testing.T) {
 	window := 24 * time.Hour
 	base := time.Unix(1_700_000_000, 0).UTC().Truncate(step)
 
-	_, to := scanWindow(base, window, step)
-	fromNext, toNext := scanWindow(base.Add(step), window, step)
+	_, to := ScanWindow(base, window, step)
+	fromNext, toNext := ScanWindow(base.Add(step), window, step)
 
 	if got := toNext.Sub(to); got != step {
 		t.Errorf("window end advanced by %v across a step boundary, want %v", got, step)
@@ -62,7 +62,7 @@ func TestScanWindowAdvancesByAStep(t *testing.T) {
 func TestScanWindowLandsOnTheStepGrid(t *testing.T) {
 	for _, step := range []time.Duration{15 * time.Second, time.Minute, 5 * time.Minute, time.Hour} {
 		now := time.Unix(1_700_000_037, 123_456_789).UTC()
-		_, to := scanWindow(now, 24*time.Hour, step)
+		_, to := ScanWindow(now, 24*time.Hour, step)
 		if !to.Equal(to.Truncate(step)) {
 			t.Errorf("step %v: to = %v is not on the grid", step, to)
 		}
@@ -81,7 +81,7 @@ func TestScanWindowToleratesNonPositiveStep(t *testing.T) {
 	window := time.Hour
 
 	for _, step := range []time.Duration{0, -time.Minute} {
-		from, to := scanWindow(now, window, step)
+		from, to := ScanWindow(now, window, step)
 		if !to.Equal(now) || !from.Equal(now.Add(-window)) {
 			t.Errorf("step %v: window = %v..%v, want the unsnapped %v..%v",
 				step, from, to, now.Add(-window), now)
