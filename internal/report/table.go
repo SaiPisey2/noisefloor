@@ -107,20 +107,24 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 	})
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	// CONC and NIGHT are here because they drive verdicts: concentration can
-	// route a noisy rule to `tune` instead of `retire`, and off-hours carries
-	// weight. Without them the table shows a verdict it cannot justify.
-	fmt.Fprintln(tw, "NOISE\tCONF\tVERDICT\tGROUP\tRULE\tFIRES\tSHORT\tSILENCED\tFLAP\tCOFIRE\tCONC\tNIGHT")
+	// CONC, CHURN and NIGHT are here because they drive verdicts: concentration
+	// and pending churn can each route a noisy rule to `tune` instead of
+	// `retire`, P50 is one of three conditions for `automate`, and off-hours
+	// carries scored weight. Without them the table shows a verdict it cannot
+	// justify.
+	fmt.Fprintln(tw, "NOISE\tCONF\tVERDICT\tGROUP\tRULE\tFIRES\tP50\tSHORT\tSILENCED\tFLAP\tCOFIRE\tCONC\tCHURN\tNIGHT")
 
 	for _, r := range sorted {
-		fmt.Fprintf(tw, "%.0f\t%.1f\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%.0f\t%.1f\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Noise, r.Confidence, r.Verdict, r.GroupName, r.AlertName,
 			r.Signals.Fires,
+			formatDuration(r.Signals.P50Duration),
 			pct(r.Signals.ShortLivedRate),
 			pct(r.Signals.SilencedRate),
 			pct(r.Signals.FlapRate),
 			pct(r.Signals.CofireRatio),
 			pct(r.Signals.Concentration),
+			pct(r.Signals.PendingChurn),
 			pct(r.Signals.OffhoursRate),
 		)
 	}
@@ -132,6 +136,51 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// formatDuration renders a duration compactly for the P50 column.
+// time.Duration.String() always prints every unit down to the one it started
+// at -- 3m0s, 1h2m0s -- which is noise nobody needs at episode-duration
+// precision. This drops zero-valued units except where one sits between two
+// non-zero units (1h0m5s keeps its zero minutes), and rounds to the second:
+// episode durations come from the query step and are never sub-second.
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	d = d.Round(time.Second)
+
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	units := [3]struct {
+		v int64
+		u string
+	}{{int64(h), "h"}, {int64(m), "m"}, {int64(s), "s"}}
+
+	first := -1
+	for i, p := range units {
+		if p.v != 0 {
+			first = i
+			break
+		}
+	}
+	if first == -1 {
+		return "0s"
+	}
+	last := len(units) - 1
+	for last > first && units[last].v == 0 {
+		last--
+	}
+
+	var out string
+	for i := first; i <= last; i++ {
+		out += fmt.Sprintf("%d%s", units[i].v, units[i].u)
+	}
+	return out
 }
 
 // pct renders a rate. Signals are guarded at their source, but this is the

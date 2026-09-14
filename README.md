@@ -81,6 +81,10 @@ at 3am scores 0 on it. See the column notes below.
 - **GROUP** / **RULE** -- the Prometheus rule group and alert name this row
   scores.
 - **FIRES** -- episodes counted in the window.
+- **P50** -- median firing episode duration, formatted compactly (`3m`, `45s`,
+  `1h2m`). Not part of the weighted NOISE sum, but one of three conditions for
+  `automate` (alongside FIRES and SHORT): without it on screen, an `automate`
+  verdict cites a number nowhere else in the row.
 - **SHORT** -- episodes that resolved themselves before anyone could act.
 - **SILENCED** -- firing time a human had explicitly silenced.
 - **FLAP** -- re-fires on the same series within an hour.
@@ -90,6 +94,11 @@ at 3am scores 0 on it. See the column notes below.
   number of series. Not part of the weighted NOISE sum, but shown because it
   can route a noisy rule to `tune` instead of `retire`; the table would
   otherwise show a verdict it can't justify.
+- **CHURN** -- pending churn: the share of pending periods that never became a
+  real alert. Not part of the weighted NOISE sum, but at 50% or higher it
+  routes a noisy rule to `tune` instead of `retire` -- the threshold sits too
+  close to normal operation, so it needs tuning rather than deletion. Without
+  this column that verdict flip had no visible cause.
 - **NIGHT** -- how much *more* of this rule's firing lands outside weekday
   09:00-18:00 than you would expect by chance. This is the fifth weighted
   signal behind NOISE (`offhours_rate`).

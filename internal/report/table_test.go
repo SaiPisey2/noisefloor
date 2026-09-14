@@ -64,6 +64,52 @@ func TestRenderIncludesEvidenceColumns(t *testing.T) {
 	}
 }
 
+// TestRenderIncludesChurnAndP50 pins issue #3: pending_churn can flip a
+// verdict from retire to tune, and P50Duration is one of three conditions
+// for automate, but neither had a column -- a rule could show every other
+// signal pointing at delete and still land on `tune` with nothing on screen
+// explaining why.
+func TestRenderIncludesChurnAndP50(t *testing.T) {
+	rows := []Row{{
+		AlertName: "DemoFlapping", GroupName: "demo",
+		Noise: 51, Confidence: 1, Verdict: score.VerdictTune,
+		Signals: score.Signals{
+			Fires: 3667, P50Duration: 3 * time.Minute,
+			PendingChurn: 0.62,
+		},
+	}}
+	var sb strings.Builder
+	if err := Render(&sb, rows, testMeta()); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{"CHURN", "P50", "62%", "3m"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{45 * time.Second, "45s"},
+		{3 * time.Minute, "3m"},
+		{time.Hour + 2*time.Minute, "1h2m"},
+		{time.Hour, "1h"},
+		{time.Hour + 5*time.Second, "1h0m5s"},
+		{90 * time.Second, "1m30s"},
+	}
+	for _, c := range cases {
+		if got := formatDuration(c.in); got != c.want {
+			t.Errorf("formatDuration(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestRenderShowsSilencesUnavailable(t *testing.T) {
 	meta := testMeta()
 	meta.SilencesAvailable = false
