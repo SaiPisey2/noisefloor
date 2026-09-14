@@ -20,6 +20,11 @@ type ghStub struct {
 	blobs map[string]string
 	// pulls is what the pulls list endpoint returns.
 	pulls []map[string]any
+	// errOn maps "ref:path" to an HTTP status this ref/path GET should fail
+	// with, simulating a transient API error (rate limit, 5xx) rather than
+	// a clean 404. Distinct from blobs missing an entry, which is a
+	// legitimate "file not found there".
+	errOn map[string]int
 
 	puts []map[string]any
 }
@@ -32,7 +37,13 @@ func (s *ghStub) server(t *testing.T) *httptest.Server {
 		path := strings.TrimPrefix(r.URL.Path, "/repos/acme/rules/contents/")
 		switch r.Method {
 		case http.MethodGet:
-			content, ok := s.blobs[r.URL.Query().Get("ref")+":"+path]
+			key := r.URL.Query().Get("ref") + ":" + path
+			if status, ok := s.errOn[key]; ok {
+				w.WriteHeader(status)
+				fmt.Fprint(w, `{"message":"simulated transient error"}`)
+				return
+			}
+			content, ok := s.blobs[key]
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
 				fmt.Fprint(w, `{"message":"Not Found"}`)
@@ -134,6 +145,53 @@ func TestCommitFilesRefusesWhenTheBaseBlobDiffers(t *testing.T) {
 	}
 	if len(stub.puts) != 0 {
 		t.Errorf("a refused commit still issued %d PUT(s)", len(stub.puts))
+	}
+}
+
+// TestCommitFilesRefusesWhenTheBaseBlobFetchErrors is the fail-closed half
+// of the base-blob guard: a transient error fetching base (rate limit, 5xx)
+// must not be read as "base agrees", because that is exactly the condition
+// under which a stale checkout would otherwise commit a silent revert.
+func TestCommitFilesRefusesWhenTheBaseBlobFetchErrors(t *testing.T) {
+	stub := &ghStub{
+		blobs: map[string]string{
+			"noisefloor/x:rules/demo.yml": localFile,
+		},
+		errOn: map[string]int{
+			"main:rules/demo.yml": http.StatusInternalServerError,
+		},
+	}
+	g := stub.provider(t)
+
+	err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: retire A"},
+	})
+	if err == nil {
+		t.Fatal("CommitFiles proceeded after the base-blob fetch errored")
+	}
+	if len(stub.puts) != 0 {
+		t.Errorf("a base-blob fetch error still issued %d PUT(s)", len(stub.puts))
+	}
+}
+
+// TestCommitFilesWritesWhenTheFileIsNewOnBase covers the legitimate
+// !baseFound case: this proposal is adding a rule file that does not exist
+// on base at all. That is not evidence base has moved on, so it must not be
+// refused.
+func TestCommitFilesWritesWhenTheFileIsNewOnBase(t *testing.T) {
+	stub := &ghStub{blobs: map[string]string{
+		"noisefloor/x:rules/demo.yml": localFile,
+		// deliberately no "main:rules/demo.yml" entry.
+	}}
+	g := stub.provider(t)
+
+	if err := g.CommitFiles(context.Background(), "acme", "rules", "main", "noisefloor/x", []FileChange{
+		{Path: "rules/demo.yml", Content: "edited", BaseContent: localFile, Message: "noisefloor: add A"},
+	}); err != nil {
+		t.Fatalf("CommitFiles refused a file that is legitimately new on base: %v", err)
+	}
+	if len(stub.puts) != 1 {
+		t.Errorf("issued %d PUTs, want 1", len(stub.puts))
 	}
 }
 

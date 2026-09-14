@@ -253,15 +253,38 @@ func (g *GitHubProvider) CommitFiles(ctx context.Context, owner, repo, base, bra
 		// The branch may predate the current base. Check base too, so a
 		// checkout that has fallen behind what is deployed is caught even
 		// when the branch still agrees with it.
+		//
+		// This must fail closed: a guard that silently skips itself on a
+		// transient error is the exact defect it exists to prevent, and it
+		// is most likely to be skipped in precisely the moment it matters
+		// -- an API hiccup on the one run where base really has moved on.
+		// So an error fetching or decoding the base blob is propagated, not
+		// swallowed.
 		onBase, baseFound, err := g.getContent(ctx, owner, repo, c.Path, base)
-		if err == nil && baseFound {
-			if baseContent, derr := onBase.decoded(); derr == nil && baseContent != c.BaseContent {
+		if err != nil {
+			return fmt.Errorf("read %s on %s: %w", c.Path, base, err)
+		}
+		if baseFound {
+			baseContent, derr := onBase.decoded()
+			if derr != nil {
+				// An encoding this tool cannot read is not evidence that
+				// base agrees with the checkout -- refuse rather than
+				// assume.
+				return fmt.Errorf("read %s on %s: %w", c.Path, base, derr)
+			}
+			if baseContent != c.BaseContent {
 				return fmt.Errorf("refusing to commit %s to %s: %s has moved on since this "+
 					"checkout (%d bytes on %s, %d bytes locally), so the proposed content would "+
 					"revert changes made there. Re-run against a fresh checkout",
 					c.Path, branch, base, len(baseContent), base, len(c.BaseContent))
 			}
 		}
+		// else: the file does not exist on base at all. That is a
+		// legitimate case -- this proposal may be adding the rule file for
+		// the first time -- and not, on its own, evidence that base has
+		// moved on out from under this checkout. There is nothing to
+		// compare it against, so no refusal here; the branch-blob check
+		// above already covers the file that does exist.
 
 		body := map[string]any{
 			"message": c.Message,
