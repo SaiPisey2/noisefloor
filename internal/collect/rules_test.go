@@ -126,6 +126,42 @@ func TestSyncRulesDeactivatesMissingRules(t *testing.T) {
 	}
 }
 
+func TestSyncRulesRefusesToDeactivateEverything(t *testing.T) {
+	ctx := context.Background()
+	db := newRuleStore()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	// Seed the store with active rules, as if a prior scan had found them.
+	if _, err := db.UpsertRule(ctx, &store.Rule{AlertName: "One", GroupName: "demo", Active: true}); err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+	if _, err := db.UpsertRule(ctx, &store.Rule{AlertName: "Two", GroupName: "demo", Active: true}); err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+
+	// Prometheus now reports no alerting rules at all.
+	res, err := SyncRules(ctx, []prom.RuleGroup{}, db, now)
+	if err == nil {
+		t.Fatal("expected an error when Prometheus reports zero rules but the store holds active ones")
+	}
+	if res.Deactivated != 2 {
+		t.Errorf("deactivated (would-be) = %d, want 2", res.Deactivated)
+	}
+
+	rules, listErr := db.ListRules(ctx)
+	if listErr != nil {
+		t.Fatalf("ListRules: %v", listErr)
+	}
+	for _, r := range rules {
+		if !r.Active {
+			t.Errorf("rule %s/%s was deactivated despite the guard", r.GroupName, r.AlertName)
+		}
+	}
+	if db.kept != nil {
+		t.Error("MarkRulesInactive must not be called when the guard refuses")
+	}
+}
+
 func TestRetunedDuringDetectsMidWindowChange(t *testing.T) {
 	windowStart := time.Unix(1_700_000_000, 0).UTC()
 

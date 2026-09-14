@@ -94,6 +94,19 @@ func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now t
 		}
 	}
 
+	// Refuse to deactivate everything. Prometheus reporting zero alerting rules
+	// when the store already holds active ones is far more likely to be a
+	// broken rule file or a reload mid-scrape than a deliberate deletion of
+	// every alert an organisation has. Wiping the active flags would make the
+	// next scan report nothing at all, silently, and the run after that would
+	// have no history to notice the gap. Leave the store alone and say so.
+	if len(keep) == 0 && res.Deactivated > 0 {
+		return res, fmt.Errorf(
+			"prometheus reported no alerting rules but the store holds %d active: "+
+				"refusing to deactivate all of them (check the rule files loaded)",
+			res.Deactivated)
+	}
+
 	if err := db.MarkRulesInactive(ctx, keep); err != nil {
 		return res, fmt.Errorf("deactivate missing rules: %w", err)
 	}
