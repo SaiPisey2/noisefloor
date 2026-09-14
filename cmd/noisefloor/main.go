@@ -125,6 +125,8 @@ usage:
   noisefloor scan [-config noisefloor.yaml]
   noisefloor init [-config noisefloor.yaml]
   noisefloor remediate [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
+
+Opening pull requests (-apply) needs a GitHub token in $GITHUB_TOKEN.
 `)
 }
 
@@ -201,7 +203,13 @@ func runRemediate(args []string) error {
 	owner := fs.String("owner", "", "GitHub repository owner (required with -apply)")
 	repoName := fs.String("repo", "", "GitHub repository name (required with -apply)")
 	base := fs.String("base", "main", "base branch to open PRs against")
-	tokenFlag := fs.String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
+	// Supply the token in $GITHUB_TOKEN. A value passed on the command line
+	// is in this process's argv, which every user on the machine can read
+	// out of `ps`, and which the shell writes to its history file --
+	// neither of which a token survives being in. The flag stays for the
+	// rare case where an environment variable is not available.
+	tokenFlag := fs.String("token", "",
+		"GitHub token; prefer $GITHUB_TOKEN, since argv is visible in ps and recorded in shell history")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -240,7 +248,7 @@ func runRemediate(args []string) error {
 	// The idempotence check (FindOpenPR) is a read-only GitHub call, so it
 	// runs in dry run too whenever -owner/-repo are given -- a dry run
 	// against a repo that already has an open PR for a rule should say so,
-	// not just repeat "would open" forever. -token is only REQUIRED with
+	// not just repeat "would open" forever. A token is only REQUIRED with
 	// -apply (EnsureBranch/CommitFiles/OpenPR need write access); a public
 	// repo's PRs can be listed unauthenticated. With no -owner/-repo at
 	// all, there is no repository to check against, so a fake provider
@@ -248,12 +256,16 @@ func runRemediate(args []string) error {
 	var provider pr.Provider
 	switch {
 	case *owner != "" && *repoName != "":
-		token := *tokenFlag
+		// $GITHUB_TOKEN first: it is the one that does not leak. -token is
+		// the fallback, and it is checked second so an environment already
+		// carrying a token is what gets used by default.
+		token := os.Getenv("GITHUB_TOKEN")
 		if token == "" {
-			token = os.Getenv("GITHUB_TOKEN")
+			token = *tokenFlag
 		}
 		if *apply && token == "" {
-			return fmt.Errorf("-apply requires a GitHub token: pass -token or set $GITHUB_TOKEN")
+			return fmt.Errorf("-apply requires a GitHub token: set $GITHUB_TOKEN " +
+				"(avoid -token, which puts the token in argv, visible in ps and shell history)")
 		}
 		provider = pr.NewGitHubProvider(token)
 	case *apply:

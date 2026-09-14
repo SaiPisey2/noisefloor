@@ -240,12 +240,24 @@ qualifies. Opening PRs for real is explicit opt-in:
 noisefloor remediate -config noisefloor.yaml -apply -owner myorg -repo alert-rules
 ```
 
-`-apply` requires `-owner`/`-repo` and a GitHub token (`-token`, or
-`$GITHUB_TOKEN`). Without `-apply`, `-owner`/`-repo` are still useful --
-given, they make the dry run check GitHub (read-only, no token required for
-a public repo) for a PR already open on a rule's branch, so the printed
-output says "already open" instead of "would open" for a rule that already
-has one.
+`-apply` requires `-owner`/`-repo` and a GitHub token:
+
+```
+export GITHUB_TOKEN=ghp_...
+noisefloor remediate -config noisefloor.yaml -apply -owner myorg -repo alert-rules
+```
+
+**Supply the token in `$GITHUB_TOKEN`.** There is also a `-token` flag, but
+anything on the command line lands in the process's argv, where every other
+user on the machine can read it out of `ps`, and in your shell's history
+file. A token does not survive either. Use the flag only where an
+environment variable genuinely is not available, and rotate anything you
+have already passed that way.
+
+Without `-apply`, `-owner`/`-repo` are still useful -- given, they make the
+dry run check GitHub (read-only, no token required for a public repo) for a
+PR already open on a rule's branch, so the printed output says "already
+open" instead of "would open" for a rule that already has one.
 
 `rules.path` must be configured (see Configuration above): remediate needs
 a file and line span for a rule before it can propose an edit to it, and
@@ -254,10 +266,13 @@ refuses to run without one.
 Two shapes of proposal:
 
 - **retire** -- deletes the rule. The PR body carries the evidence table:
-  fires, short-lived %, silenced % (with who silenced it and when),
-  confidence, and the observation window -- everything a reviewer needs to
-  check the claim against their own Prometheus, stated as a query to run
-  and a count to expect, not just asserted.
+  fires, short-lived % (with the threshold it was measured against, and the
+  `for:` that threshold was derived from), silenced % (with who silenced it
+  and when), confidence, and the observation window -- everything a
+  reviewer needs to check the claim against their own Prometheus, stated as
+  a query to run and a count to expect, not just asserted. If Alertmanager
+  was unreachable during the scan, the silence row says so rather than
+  printing a `0%` nobody measured.
 - **tune** -- raises `for:`. The PR body states the counterfactual
   explicitly: *"p90 episode is 4m, current `for: 30s`; `for: 4m30s` would
   have suppressed 46% of past fires and retained 128 of 128 episodes longer
@@ -266,9 +281,12 @@ Two shapes of proposal:
   counterfactual code).
 
 Every diff is minimal and surgical: a retire deletes exactly the rule's own
-lines (nothing reformatted, reordered, or stripped elsewhere in the file);
-a tune changes only the `for:` line's value, preserving its indentation and
-any trailing comment, or inserts a new `for:` line when the rule has none.
+lines -- stopping at its last line of content, so the blank line and doc
+comments that introduce the *next* rule stay where they are; a tune changes
+only the `for:` line's value, preserving its indentation and any trailing
+comment, or inserts a new `for:` line when the rule has none. A written or
+inserted line takes the file's own line ending, so a CRLF rule file does
+not come back mixed.
 Never a PR touching more than one rule -- a PR touching twenty rules gets
 closed wholesale, and the tool would be dead on arrival.
 
@@ -282,7 +300,32 @@ closed wholesale, and the tool would be dead on arrival.
   expression that no longer exists);
 - a rule below the confidence floor (not enough evidence to propose
   anything);
-- a rule noisefloor cannot locate in the configured checkout.
+- a rule noisefloor cannot locate in the configured checkout;
+- a rule whose `(group, alertname)` the checkout defines more than once --
+  including twice inside a single group, which is legal Prometheus and
+  which the cross-group ambiguity check above cannot see. There is no way
+  to tell which definition the scored history belongs to;
+- a rule whose file no longer matches what Prometheus evaluates. Every
+  number in the PR body is measured against the live rule and every line of
+  the diff is computed against the file, so a checkout that has fallen
+  behind produces a PR arguing one case and performing a different edit.
+  The refusal names both values;
+- any rule in a file holding more than one YAML document. Rule positions
+  are line numbers within one document, so a span bounded by the end of the
+  file would run straight through every document after it.
+
+Two more refusals happen at the forge rather than at the proposal:
+
+- **a PR a maintainer closed is not reopened.** Branch names are
+  deterministic per proposal, so a closed PR is an answer to this exact
+  proposal. noisefloor reports it and moves on; it proposes again only when
+  the proposal itself changes, which changes the branch.
+- **a commit is refused if the remote has moved.** Committing writes a
+  whole file, so before writing, noisefloor reads the file on both the base
+  and the bot's branch and requires them to match the checkout the edit was
+  computed from, byte for byte. Anything else would silently revert work
+  the run never saw -- under a PR titled "retire X". Re-run against a fresh
+  checkout.
 
 **Idempotent.** Running the bot twice does not open a second PR for the
 same rule and the same proposal: each proposal's branch name is
