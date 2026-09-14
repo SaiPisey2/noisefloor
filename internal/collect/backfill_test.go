@@ -475,3 +475,21 @@ func TestFakeStoreRuleIDByAlertNameSeesUpsertedRule(t *testing.T) {
 			gotID, found, id)
 	}
 }
+
+func TestRunRejectsNonPositiveChunk(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	for _, bad := range []time.Duration{0, -time.Hour} {
+		cfg := testConfig()
+		cfg.Prometheus.Chunk = config.Duration(bad)
+
+		p := &fakeProm{floor: now.Add(-30 * 24 * time.Hour)}
+		_, err := New(p, newFakeStore(), cfg).Run(context.Background(), now.Add(-24*time.Hour), now)
+		if err == nil {
+			t.Errorf("chunk %v accepted; the chunk loop would never advance", bad)
+		}
+		if len(p.calls) != 0 {
+			t.Errorf("chunk %v queried Prometheus %d times before failing", bad, len(p.calls))
+		}
+	}
+}
