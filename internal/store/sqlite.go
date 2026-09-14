@@ -47,7 +47,21 @@ func fromUnix(v int64) time.Time {
 	}
 	return time.Unix(v, 0).UTC()
 }
-func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+// toJSON marshals v for a NOT NULL TEXT column. Every caller passes a plain
+// map or slice of JSON-safe primitives -- rule labels/annotations, episode
+// labels, silence matchers, or the scored signals map -- none of which
+// contain cycles, channels, or anything else json.Marshal can fail on. The
+// error is therefore tolerated rather than propagated, but "{}" is returned
+// rather than "" so the column still holds valid JSON if that assumption is
+// ever wrong: an empty string is not valid JSON, and every reader of this
+// column assumes it is.
+func toJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
 
 func fromJSONMap(s string) map[string]string {
 	m := map[string]string{}
