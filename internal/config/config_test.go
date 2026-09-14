@@ -84,3 +84,22 @@ func TestDefaultWeightsSumToOne(t *testing.T) {
 		t.Errorf("default weights sum = %v, want 1.0", sum)
 	}
 }
+
+func TestLoadDefaultsTimeoutToTenMinutes(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Timeout.Std() != 10*time.Minute {
+		t.Errorf("timeout = %v, want 10m", cfg.Timeout.Std())
+	}
+}
+
+func TestLoadRejectsNonPositiveTimeout(t *testing.T) {
+	body := "prometheus:\n  url: http://localhost:9090\ntimeout: 0s\n"
+	path := writeTemp(t, body)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with timeout: 0s, want error")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect"
@@ -27,6 +28,7 @@ alertmanager:
 
 database: noisefloor.db
 window: 30d
+timeout: 10m
 timezone: Local
 
 # Weights must sum to 1.0. Only these five signals move the noise score.
@@ -81,10 +83,16 @@ func runInit(args []string) error {
 		return err
 	}
 
-	if _, err := os.Stat(*path); err == nil {
-		return fmt.Errorf("%s already exists", *path)
+	// O_EXCL rather than Stat-then-Write: same length, no window between the
+	// check and the write, and a Stat error other than "not exists" cannot be
+	// misread as "absent".
+	f, err := os.OpenFile(*path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", *path, err)
 	}
-	if err := os.WriteFile(*path, []byte(sampleConfig), 0o644); err != nil {
+	defer f.Close()
+
+	if _, err := f.WriteString(sampleConfig); err != nil {
 		return fmt.Errorf("write %s: %w", *path, err)
 	}
 	fmt.Printf("wrote %s\n", *path)
@@ -103,7 +111,14 @@ func runScan(args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// A scan issues one range query per chunk -- 120 of them over a 30-day
+	// window at the default 6h chunk. Without a deadline a hung Prometheus
+	// hangs the command forever, and this is a thing people run in CI.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout.Std())
+	defer cancel()
+
 	db, err := store.Open(cfg.Database)
 	if err != nil {
 		return err
@@ -131,19 +146,49 @@ func runScan(args []string) error {
 		return err
 	}
 
-	var silences []store.Silence
-	if cfg.Alertmanager.URL != "" {
-		silences, err = collect.FetchSilences(ctx, cfg.Alertmanager.URL, nil)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: silences unavailable, silenced_rate will read 0: %v\n", err)
-		} else if err := db.UpsertSilences(ctx, silences); err != nil {
+	// silenced_rate carries a quarter of the score, so a failure here is not a
+	// detail: every rule scores up to 25 points lower and a `retire` can become
+	// a `keep`. Record whether the signal was actually available so the report
+	// can say "unavailable" rather than print a 0 that looks like a measurement.
+	silencesAvailable := true
+	switch {
+	case cfg.Alertmanager.URL == "":
+		silencesAvailable = false
+		fmt.Fprintln(os.Stderr,
+			"warning: no alertmanager.url configured; silenced_rate reads 0 for every rule")
+	default:
+		fetched, ferr := collect.FetchSilences(ctx, cfg.Alertmanager.URL, nil)
+		if ferr != nil {
+			silencesAvailable = false
+			fmt.Fprintf(os.Stderr,
+				"warning: alertmanager unreachable, silenced_rate reads 0 for every rule: %v\n", ferr)
+		} else if err := db.UpsertSilences(ctx, fetched); err != nil {
 			return err
 		}
+	}
+
+	// Score against everything ever observed, not just this fetch. Alertmanager
+	// garbage-collects expired silences (120h by default), so a 30-day window
+	// can only ever see the older ones from our own store -- which is the whole
+	// reason we persist them.
+	silences, err := db.ListSilences(ctx, backfill.WindowStart, backfill.WindowEnd)
+	if err != nil {
+		return err
 	}
 
 	rules, err := db.ListRules(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Count the store's inactive total, not how many this run deactivated --
+	// the run after a rule disappears would otherwise report 0 inactive while
+	// the store holds one.
+	inactive := 0
+	for _, r := range rules {
+		if !r.Active {
+			inactive++
+		}
 	}
 	allEpisodes, err := db.ListEpisodesInWindow(ctx, backfill.WindowStart, backfill.WindowEnd)
 	if err != nil {
@@ -205,12 +250,13 @@ func runScan(args []string) error {
 	}
 
 	return report.Render(os.Stdout, rows, report.Meta{
-		WindowStart:   backfill.WindowStart,
-		WindowEnd:     backfill.WindowEnd,
-		Truncated:     backfill.Truncated,
-		RulesActive:   ruleSync.Active,
-		RulesInactive: ruleSync.Deactivated,
-		Episodes:      backfill.Episodes,
-		Silences:      len(silences),
+		WindowStart:       backfill.WindowStart,
+		WindowEnd:         backfill.WindowEnd,
+		Truncated:         backfill.Truncated,
+		RulesActive:       ruleSync.Active,
+		RulesInactive:     inactive,
+		Episodes:          backfill.Episodes,
+		Silences:          len(silences),
+		SilencesAvailable: silencesAvailable,
 	})
 }

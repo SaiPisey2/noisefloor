@@ -15,6 +15,7 @@ type Config struct {
 	Rules        Rules        `yaml:"rules"`
 	Database     string       `yaml:"database"`
 	Window       Duration     `yaml:"window"`
+	Timeout      Duration     `yaml:"timeout"`
 	Timezone     string       `yaml:"timezone"`
 	Weights      Weights      `yaml:"weights"`
 	Confidence   Confidence   `yaml:"confidence"`
@@ -61,6 +62,7 @@ func Default() Config {
 		},
 		Database: "noisefloor.db",
 		Window:   Duration(30 * 24 * time.Hour),
+		Timeout:  Duration(10 * time.Minute),
 		Timezone: "Local",
 		Weights: Weights{
 			ShortLivedRate: 0.30,
@@ -104,6 +106,9 @@ func (c Config) Validate() error {
 	}
 	if c.Window.Std() <= 0 {
 		return fmt.Errorf("window must be positive")
+	}
+	if c.Timeout.Std() <= 0 {
+		return fmt.Errorf("timeout must be positive")
 	}
 	if sum := c.Weights.Sum(); math.Abs(sum-1.0) > 0.001 {
 		return fmt.Errorf("weights must sum to 1.0, got %.3f", sum)

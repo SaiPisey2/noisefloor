@@ -39,7 +39,7 @@ func scenarios() []scenario {
 	// fire and Spiky read cofire_ratio 100%, which is an artefact of the
 	// fixture rather than anything about the rule.
 	//
-	// Every on-period below is at least two sample steps long, and every
+	// Every on-period below is at least three sample steps long, and every
 	// off-period is longer than the collector's two-step gap tolerance.
 	// This is not cosmetic: a 20s pulse sampled every 60s aliases away
 	// entirely, and a 45s-on/45s-off wave sampled at 60s produces gaps of at
@@ -49,8 +49,8 @@ func scenarios() []scenario {
 		{
 			// 3m firing every 97m (94m off): short-lived, and far enough
 			// apart -- past the 1h flap window -- that it does not register
-			// as flapping. Reaches `retire` only once a silence exists
-			// against it, which is the correct bar.
+			// as flapping. Reaches `retire` at zero silences: noise alone
+			// clears the threshold.
 			alertname: "DemoSpiky", severity: "warning",
 			firing: func(t float64) bool { return mod(t, 5820) < 180 },
 		},

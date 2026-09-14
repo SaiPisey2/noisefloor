@@ -20,7 +20,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "Flapping signal breached"}
 
-      # Fires for 1h every 90m and stays firing. Expected verdict: automate.
+      # Fires for 30m every 90m and stays firing. Expected verdict: automate.
       - alert: DemoSustained
         expr: demo_sustained_gauge > 0
         for: 2m

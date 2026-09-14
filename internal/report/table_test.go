@@ -1,6 +1,7 @@
 package report
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ func testMeta() Meta {
 		WindowStart: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC),
 		WindowEnd:   time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC),
 		RulesActive: 2, Episodes: 300, Silences: 4,
+		SilencesAvailable: true,
 	}
 }
 
@@ -72,5 +74,76 @@ func TestRenderIncludesEvidenceColumns(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderShowsSilencesUnavailable(t *testing.T) {
+	meta := testMeta()
+	meta.SilencesAvailable = false
+
+	var sb strings.Builder
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "unavailable (silenced_rate reads 0 for every rule)") {
+		t.Errorf("unavailable silences must say so, not print a count that looks like a measurement, got:\n%s", out)
+	}
+	if strings.Contains(out, "Silences   4") {
+		t.Error("must not print a silence count when the signal was unavailable")
+	}
+}
+
+// TestRenderBreaksTiesByGroupThenName guards determinism. sort.Slice is not
+// stable and alert names are not unique across groups, so without a final
+// tiebreak two equally-noisy rules with the same name in different groups
+// could swap places between runs of the same scan.
+func TestRenderBreaksTiesByGroupThenName(t *testing.T) {
+	rows := []Row{
+		{AlertName: "Shared", GroupName: "zzz", Noise: 50, Verdict: score.VerdictKeep},
+		{AlertName: "Shared", GroupName: "aaa", Noise: 50, Verdict: score.VerdictKeep},
+	}
+	var sb strings.Builder
+	if err := Render(&sb, rows, testMeta()); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if strings.Index(out, "aaa") > strings.Index(out, "zzz") {
+		t.Error("equal noise and name must tiebreak on group name, ascending")
+	}
+}
+
+func TestPctClampsAndHandlesNaN(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{math.NaN(), "-"},
+		{-0.5, "0%"},
+		{1.5, "100%"},
+		{0.5, "50%"},
+	}
+	for _, c := range cases {
+		if got := pct(c.in); got != c.want {
+			t.Errorf("pct(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRenderTruncatedWindowUsesMinutePrecisionAndFractionalDays(t *testing.T) {
+	meta := testMeta()
+	meta.Truncated = true
+	meta.WindowStart = time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+
+	var sb strings.Builder
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "2026-08-15 12:00") {
+		t.Errorf("truncated window must show minute precision on the start, got:\n%s", out)
+	}
+	if !strings.Contains(out, "29.5d") {
+		t.Errorf("truncated window must show a fractional day count, got:\n%s", out)
 	}
 }
