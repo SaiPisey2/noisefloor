@@ -26,3 +26,17 @@ demo-logs:
 # a PASS for an integration target that never touched the running stack.
 integration:
 	go test ./demo/... -tags=integration -v -count=1
+
+.PHONY: demo-seed
+
+# Generate synthetic ALERTS history and convert it to TSDB blocks that the
+# demo Prometheus loads on start.
+demo-seed:
+	go run ./demo/seed -out demo/seed/alerts.openmetrics -days 30
+	docker run --rm -v $(PWD)/demo/seed:/seed --entrypoint promtool prom/prometheus:v3.6.0 \
+		tsdb create-blocks-from openmetrics /seed/alerts.openmetrics /seed/blocks
+	docker-compose -f demo/docker-compose.yml stop prometheus
+	docker run --rm -v $(PWD)/demo/seed/blocks:/src -v demo_promdata:/dst alpine \
+		sh -c 'cp -r /src/* /dst/'
+	docker-compose -f demo/docker-compose.yml start prometheus
+	@echo "seeded 30d of ALERTS history"

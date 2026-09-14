@@ -19,3 +19,7 @@ AGENTS.md
 .DS_Store
 .idea/
 .vscode/
+
+# generated demo history
+demo/seed/alerts.openmetrics
+demo/seed/blocks/
