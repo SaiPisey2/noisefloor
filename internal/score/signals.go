@@ -16,6 +16,11 @@ const (
 	// shortLivedFloor is the minimum "nothing to do about it" threshold, used
 	// when a rule has no for: clause.
 	shortLivedFloor = 5 * time.Minute
+	// shortLivedCap bounds that threshold. A human's response time does not
+	// grow with a rule's debounce, so scaling without a ceiling would score a
+	// five-hour episode on a `for: 2h` rule as too short to act on --
+	// penalising precisely the rules whose authors already tuned them.
+	shortLivedCap = 30 * time.Minute
 	// flapWindow is how soon a re-fire on the same series counts as flapping.
 	flapWindow = time.Hour
 	// cofireWindow is how close two rules must fire to count as co-firing.
@@ -76,16 +81,21 @@ func Compute(in Input) Signals {
 
 	var firing, pending []store.Episode
 	for _, e := range in.Episodes {
-		if e.State == store.StatePending {
-			pending = append(pending, e)
-		} else {
+		switch e.State {
+		case store.StateFiring:
 			firing = append(firing, e)
+		case store.StatePending:
+			pending = append(pending, e)
+		default:
+			// An unknown state is not evidence of anything. Treating it as
+			// firing would inflate Fires and the denominator of every scored
+			// rate, quietly diluting all of them.
 		}
 	}
 
 	s := Signals{Fires: len(firing)}
 	if len(firing) == 0 {
-		s.PendingChurn = pendingChurn(pending, firing, in.Rule)
+		s.PendingChurn = pendingChurn(pending, firing)
 		return s
 	}
 
@@ -121,7 +131,7 @@ func Compute(in Input) Signals {
 	s.FlapRate = flapRate(byFingerprint, len(firing))
 	s.CofireRatio = cofireRatio(firing, in.AllEpisodes, in.Rule.ID)
 	s.Concentration = concentration(byFingerprint)
-	s.PendingChurn = pendingChurn(pending, firing, in.Rule)
+	s.PendingChurn = pendingChurn(pending, firing)
 
 	if totalFiringSec > 0 {
 		s.SilencedRate = math.Min(1, silencedSec/totalFiringSec)
@@ -130,13 +140,28 @@ func Compute(in Input) Signals {
 }
 
 // shortLivedThreshold is the duration below which an episode had no time to be
-// acted on. It scales with for:, because a rule that waits 10 minutes before
-// firing is making a different claim about urgency than one that fires instantly.
+// acted on. It scales mildly with for:, because a rule that waits 10 minutes
+// before firing makes a different claim about urgency than one that fires
+// instantly -- but it is bounded, because a responder's reaction time does not
+// scale with the rule's debounce at all.
+//
+// The early return for a large For also guards 3*For, which overflows
+// time.Duration past roughly 97 years and would silently wrap.
 func shortLivedThreshold(r store.Rule) time.Duration {
-	if scaled := 3 * r.For; scaled > shortLivedFloor {
+	if r.For <= 0 {
+		return shortLivedFloor
+	}
+	if r.For >= shortLivedCap {
+		return shortLivedCap
+	}
+	switch scaled := 3 * r.For; {
+	case scaled < shortLivedFloor:
+		return shortLivedFloor
+	case scaled > shortLivedCap:
+		return shortLivedCap
+	default:
 		return scaled
 	}
-	return shortLivedFloor
 }
 
 func isOffHours(t time.Time) bool {
@@ -170,45 +195,89 @@ func flapRate(byFingerprint map[string][]store.Episode, total int) float64 {
 // cofireRatio measures how often this rule fires in lockstep with several
 // others, which is what a cause-based alert riding a real incident looks like
 // from the outside.
+//
+// Only FIRING episodes of other rules count. Nobody was paged for a pending
+// alert, so a pending co-occurrence is not evidence that this rule rode
+// someone else's incident.
+//
+// Comparison is on start times only, deliberately. An overlap test would mark
+// every long-running alert as co-firing with everything that happened while it
+// was open, which is the opposite of the signal wanted here.
 func cofireRatio(own, all []store.Episode, ruleID int64) float64 {
 	if len(own) == 0 || len(all) == 0 {
 		return 0
 	}
-	var cofired float64
-	for _, e := range own {
-		others := map[int64]bool{}
-		for _, o := range all {
-			if o.RuleID == ruleID {
-				continue
-			}
-			if absDuration(o.StartedAt.Sub(e.StartedAt)) <= cofireWindow {
-				others[o.RuleID] = true
-			}
+
+	others := make([]store.Episode, 0, len(all))
+	for _, o := range all {
+		if o.RuleID != ruleID && o.State == store.StateFiring {
+			others = append(others, o)
 		}
-		if len(others) >= cofireMinOthers {
+	}
+	if len(others) == 0 {
+		return 0
+	}
+
+	// Sort both once and sweep, rather than scanning every other episode for
+	// every own episode. The naive form is O(own x all): at production scale
+	// -- tens of thousands of episodes across a couple of hundred rules --
+	// that is hundreds of millions of comparisons per scan.
+	sort.Slice(others, func(i, j int) bool { return others[i].StartedAt.Before(others[j].StartedAt) })
+	ownSorted := append([]store.Episode(nil), own...)
+	sort.Slice(ownSorted, func(i, j int) bool { return ownSorted[i].StartedAt.Before(ownSorted[j].StartedAt) })
+
+	var cofired float64
+	lo := 0
+	for _, e := range ownSorted {
+		bandStart := e.StartedAt.Add(-cofireWindow)
+		bandEnd := e.StartedAt.Add(cofireWindow)
+
+		// ownSorted ascends, so the band's left edge only ever moves right.
+		for lo < len(others) && others[lo].StartedAt.Before(bandStart) {
+			lo++
+		}
+
+		distinct := map[int64]bool{}
+		for i := lo; i < len(others) && !others[i].StartedAt.After(bandEnd); i++ {
+			distinct[others[i].RuleID] = true
+		}
+		if len(distinct) >= cofireMinOthers {
 			cofired++
 		}
 	}
-	return cofired / float64(len(own))
+	return cofired / float64(len(ownSorted))
 }
 
 // pendingChurn is the share of pending periods that never became a real alert.
 // A high value means the threshold sits too close to normal operation.
-func pendingChurn(pending, firing []store.Episode, r store.Rule) float64 {
+//
+// The tolerance is one sample step, not the rule's for:. A pending period
+// becomes firing on the very next evaluation or not at all; allowing a
+// for:-sized window would match a firing episode hours away and call it the
+// same event, systematically under-reporting churn on long-for: rules.
+//
+// The gap is signed, and a firing episode starting BEFORE the pending period
+// ended does not count: that is a different, already-open episode, not this
+// pending period becoming real. One step of slack is allowed on each side
+// only to absorb sampling jitter at the boundary.
+func pendingChurn(pending, firing []store.Episode) float64 {
 	if len(pending) == 0 {
 		return 0
-	}
-	tolerance := 2 * time.Minute
-	if r.For > 0 {
-		tolerance = r.For
 	}
 
 	var churned float64
 	for _, p := range pending {
+		tolerance := p.Resolution
+		if tolerance <= 0 {
+			tolerance = time.Minute
+		}
+
 		became := false
 		for _, f := range firing {
-			gap := absDuration(f.StartedAt.Sub(p.EndedAt))
-			if f.Fingerprint == p.Fingerprint && gap <= tolerance {
+			if f.Fingerprint != p.Fingerprint {
+				continue
+			}
+			if gap := f.StartedAt.Sub(p.EndedAt); gap >= -tolerance && gap <= tolerance {
 				became = true
 				break
 			}
@@ -243,6 +312,15 @@ func concentration(byFingerprint map[string][]store.Episode) float64 {
 		return 0
 	}
 	g := (2*weighted)/(n*sum) - (n+1)/n
+
+	// Small-sample correction. The uncorrected Gini over n positive counts
+	// cannot exceed (n-1)/n, so a rule with two fingerprints would top out at
+	// 0.50 however lopsided it is -- and the verdict logic thresholds
+	// concentration at 0.60, which it could then never reach. Rescaling by
+	// n/(n-1) puts the maximum at 1.0 for any n.
+	if n > 1 {
+		g *= n / (n - 1)
+	}
 	return math.Max(0, math.Min(1, g))
 }
 
@@ -261,11 +339,4 @@ func percentile(durs []time.Duration, p float64) time.Duration {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
-}
-
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
 }
