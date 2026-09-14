@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	promapi "github.com/prometheus/client_golang/api"
@@ -60,8 +61,10 @@ func (a *API) QueryRange(ctx context.Context, query string, start, end time.Time
 			query, start.Format(time.RFC3339), end.Format(time.RFC3339), err)
 	}
 	if len(warnings) > 0 {
-		// Warnings are not fatal but callers deserve to see them once.
-		fmt.Printf("prometheus warning: %v\n", warnings)
+		// Warnings are not fatal, but they go to stderr, never stdout: the CLI
+		// prints its report to stdout and a warning interleaved into it would
+		// corrupt the output for anyone piping or parsing it.
+		fmt.Fprintf(os.Stderr, "prometheus warning: %v\n", warnings)
 	}
 	m, ok := val.(model.Matrix)
 	if !ok {
