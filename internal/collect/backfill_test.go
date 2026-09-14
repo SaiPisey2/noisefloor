@@ -55,6 +55,7 @@ type fakeStore struct {
 	created  map[string]store.Rule // every rule UpsertRule has created, by alert name
 	inactive []string              // alert names recorded as orphans
 	episodes []store.Episode
+	byKey    map[episodeKey]int // index into episodes, mirroring the UNIQUE key
 	nextID   int64
 }
 
@@ -63,6 +64,7 @@ func newFakeStore() *fakeStore {
 		rules:   map[string]int64{},
 		byName:  map[string]int64{},
 		created: map[string]store.Rule{},
+		byKey:   map[episodeKey]int{},
 		nextID:  1,
 	}
 }
@@ -104,8 +106,32 @@ func (s *fakeStore) RuleIDByAlertName(_ context.Context, alertName string) (int6
 	return 0, false, nil
 }
 
+// episodeKey mirrors the real store's
+// UNIQUE (rule_id, fingerprint, started_at, state).
+type episodeKey struct {
+	ruleID      int64
+	fingerprint string
+	startedAt   int64
+	state       string
+}
+
+// InsertEpisodes upserts on the real store's uniqueness key, so a test can
+// tell "stored again" from "stored twice".
+//
+// It deliberately does NOT model the real store's overlap rejection. That is a
+// second, independent line of defence, and modelling it here would hide a
+// backfiller that emits shifted duplicates in the first place -- which is
+// exactly what these tests exist to catch.
 func (s *fakeStore) InsertEpisodes(_ context.Context, eps []store.Episode) error {
-	s.episodes = append(s.episodes, eps...)
+	for _, e := range eps {
+		k := episodeKey{e.RuleID, e.Fingerprint, e.StartedAt.Unix(), e.State}
+		if i, ok := s.byKey[k]; ok {
+			s.episodes[i].EndedAt = e.EndedAt
+			continue
+		}
+		s.byKey[k] = len(s.episodes)
+		s.episodes = append(s.episodes, e)
+	}
 	return nil
 }
 
@@ -728,5 +754,128 @@ func TestRunTreatsNoHistoryAsAnEmptyWindowNotAnError(t *testing.T) {
 	}
 	if res.Episodes != 0 {
 		t.Errorf("episodes = %d, want 0", res.Episodes)
+	}
+}
+
+// gridMatrixFn models what query_range actually returns: a sample grid
+// anchored to the QUERY START, not to wall-clock or to when the alert fired.
+// Samples land on cs, cs+step, cs+2*step, ... and only those falling inside
+// the fixed absolute firing period [fireStart, fireEnd) are returned. Move the
+// query start by a second and every returned timestamp moves with it, which is
+// the whole mechanism behind issue #15.
+func gridMatrixFn(alertName string, fireStart, fireEnd time.Time, step time.Duration) func(cs, ce time.Time) model.Matrix {
+	return func(cs, ce time.Time) model.Matrix {
+		var vals []model.SamplePair
+		for t := cs; t.Before(ce); t = t.Add(step) {
+			if t.Before(fireStart) || !t.Before(fireEnd) {
+				continue
+			}
+			vals = append(vals, model.SamplePair{
+				Timestamp: model.TimeFromUnix(t.Unix()), Value: 1,
+			})
+		}
+		if len(vals) == 0 {
+			return model.Matrix{}
+		}
+		return model.Matrix{{
+			Metric: model.Metric{
+				"__name__": "ALERTS", "alertname": model.LabelValue(alertName),
+				"alertstate": "firing", "instance": "x",
+			},
+			Values: vals,
+		}}
+	}
+}
+
+// TestRunTwiceWithShiftedWindowEndDoesNotDuplicateEpisodes is the regression
+// test for issue #15. Two scans a few seconds apart over the same history must
+// leave the store holding the same episodes, not two shifted copies of each.
+//
+// Without the step-grid snapping in Run, the second scan's window starts 37s
+// later, Prometheus returns the same firings on a grid shifted by 37s, and
+// every episode lands under a started_at the uniqueness key has never seen --
+// so the store ends up with the same firings twice, adjacent in time, which
+// flap_rate reads as re-fires.
+func TestRunTwiceWithShiftedWindowEndDoesNotDuplicateEpisodes(t *testing.T) {
+	step := time.Minute
+	base := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+
+	// Two firings at fixed absolute times, far enough apart not to stitch.
+	fire1Start, fire1End := base.Add(-5*time.Hour), base.Add(-5*time.Hour+20*time.Minute)
+	fire2Start, fire2End := base.Add(-2*time.Hour), base.Add(-2*time.Hour+10*time.Minute)
+
+	matrixFn := func(cs, ce time.Time) model.Matrix {
+		m := gridMatrixFn("Spiky", fire1Start, fire1End, step)(cs, ce)
+		second := gridMatrixFn("Spiky", fire2Start, fire2End, step)(cs, ce)
+		if len(m) == 0 {
+			return second
+		}
+		if len(second) == 0 {
+			return m
+		}
+		m[0].Values = append(m[0].Values, second[0].Values...)
+		return m
+	}
+
+	fs := newFakeStore().withRule("Spiky")
+	cfg := testConfig()
+
+	run := func(end time.Time) int {
+		t.Helper()
+		p := &fakeProm{matrixFn: matrixFn}
+		if _, err := New(p, fs, cfg).Run(context.Background(), end.Add(-6*time.Hour), end); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return len(fs.episodes)
+	}
+
+	first := run(base)
+	if first == 0 {
+		t.Fatal("first scan stored no episodes; the test cannot detect duplication")
+	}
+	second := run(base.Add(37 * time.Second))
+
+	if second != first {
+		t.Fatalf("second scan 37s later left %d episodes, want %d unchanged; "+
+			"the window must snap to the step grid so a rescan re-queries the "+
+			"same sample grid and the store upserts instead of duplicating",
+			second, first)
+	}
+}
+
+// TestRunSnapsWindowToTheStepGrid pins the mechanism the regression test
+// depends on: whatever instant within a step Run is handed, it queries from
+// the same grid point.
+func TestRunSnapsWindowToTheStepGrid(t *testing.T) {
+	step := time.Minute
+	base := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	cfg := testConfig()
+
+	var starts, ends []time.Time
+	for _, offset := range []time.Duration{0, time.Second, 17 * time.Second, 59 * time.Second} {
+		end := base.Add(offset)
+		p := &fakeProm{}
+		res, err := New(p, newFakeStore(), cfg).Run(context.Background(), end.Add(-6*time.Hour), end)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(p.calls) == 0 {
+			t.Fatal("Run issued no queries")
+		}
+		starts = append(starts, p.calls[0][0])
+		ends = append(ends, res.WindowEnd)
+	}
+
+	for i := 1; i < len(starts); i++ {
+		if !starts[i].Equal(starts[0]) {
+			t.Errorf("query start %v differs from %v; windows within one step "+
+				"must query an identical grid", starts[i], starts[0])
+		}
+		if !ends[i].Equal(ends[0]) {
+			t.Errorf("window end %v differs from %v", ends[i], ends[0])
+		}
+	}
+	if got := starts[0]; !got.Equal(got.Truncate(step)) {
+		t.Errorf("query start %v is not on a %v boundary", got, step)
 	}
 }

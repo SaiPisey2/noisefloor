@@ -141,6 +141,36 @@ func runInit(args []string) error {
 	return nil
 }
 
+// scanWindow returns the query window for a scan started at now: `to` rounded
+// DOWN to a multiple of step, and `from` derived from that rounded value.
+//
+// The truncation is load-bearing for deduplication, not tidiness. Prometheus
+// aligns the sample grid of a range query to the query start, so a window
+// beginning one second later comes back with every sample timestamp shifted by
+// that second. Shifted samples reconstruct into episodes with shifted
+// started_at values, and the store's
+// UNIQUE (rule_id, fingerprint, started_at, state) then sees new rows instead
+// of upserting the ones it already holds: the same real firings get stored
+// twice, adjacent in time. flap_rate reads adjacent episodes as re-fires, so a
+// rule scanned repeatedly -- on a cron, which is how this is meant to be used
+// -- drifts from `retire` to `tune` with no change in its actual behaviour.
+// Anchoring `to` to the step grid makes every scan within the same step ask
+// for exactly the same window, so the grid, the episodes and the rows are
+// identical and the upsert deduplicates as intended.
+//
+// time.Time.Truncate rounds down against absolute time since the zero instant,
+// which is the fixed grid this needs; it is not a local-midnight or
+// wall-clock-relative operation.
+func scanWindow(now time.Time, window, step time.Duration) (from, to time.Time) {
+	if step <= 0 {
+		// config.Validate rejects it, but do not silently return a zero
+		// window if it is ever reached.
+		return now.Add(-window), now
+	}
+	to = now.Truncate(step)
+	return to.Add(-window), to
+}
+
 func runScan(args []string) error {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
@@ -222,7 +252,8 @@ func runScan(args []string) error {
 			strings.Join(ruleSync.AmbiguousNames, ", "))
 	}
 
-	backfill, err := collect.New(api, db, cfg).Run(ctx, now.Add(-cfg.Window.Std()), now)
+	from, to := scanWindow(now, cfg.Window.Std(), cfg.Prometheus.Step.Std())
+	backfill, err := collect.New(api, db, cfg).Run(ctx, from, to)
 	if err != nil {
 		return err
 	}

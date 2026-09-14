@@ -180,6 +180,26 @@ func (s *SQLite) MarkRulesInactive(ctx context.Context, keep []int64) error {
 	return nil
 }
 
+// InsertEpisodes writes episodes, upserting on
+// (rule_id, fingerprint, started_at, state) and DISCARDING any episode that
+// overlaps one already stored for the same series.
+//
+// The overlap rule is the store's own defence against re-storing the same
+// firing at a shifted timestamp. One series is either firing or it is not, so
+// two overlapping episodes with the same rule, fingerprint and state cannot
+// both be real: an overlap is always the same firing observed twice, and the
+// uniqueness constraint alone cannot see that, because a start that moved by
+// a few seconds is a different key. The collectors keep the sample grid stable
+// so this should not arise (see collect.Backfiller.Run), but the grid depends
+// on prometheus.step, which an operator can change between runs, and on where
+// the window starts, which slides forward every run and re-clips any episode
+// straddling it. Neither is visible from here, and a duplicate that gets in is
+// silently wrong rather than loudly wrong: adjacent duplicates read as
+// re-fires and inflate flap_rate until the verdict flips.
+//
+// What is already stored wins. A re-observation carries no information the
+// stored row does not already have, and refusing to rewrite history means a
+// rescan can never shorten or move an episode it previously recorded.
 func (s *SQLite) InsertEpisodes(ctx context.Context, eps []Episode) error {
 	if len(eps) == 0 {
 		return nil
@@ -190,10 +210,25 @@ func (s *SQLite) InsertEpisodes(ctx context.Context, eps []Episode) error {
 	}
 	defer tx.Rollback()
 
+	// The NOT EXISTS is a half-open overlap test: an existing episode of the
+	// same series whose span intersects this one, excluding the one that
+	// shares this exact start -- that one is this same episode being
+	// re-observed, and belongs on the ON CONFLICT path so a still-running
+	// firing can have its ended_at extended.
+	//
+	// INSERT ... SELECT rather than VALUES because a row can be filtered out;
+	// SQLite needs the WHERE for ON CONFLICT to parse unambiguously after a
+	// SELECT, which this supplies anyway.
 	const q = `
 INSERT INTO episodes (rule_id, fingerprint, labels, started_at, ended_at,
                       resolution_seconds, source, state)
-VALUES (?,?,?,?,?,?,?,?)
+SELECT ?,?,?,?,?,?,?,?
+WHERE NOT EXISTS (
+  SELECT 1 FROM episodes e
+  WHERE e.rule_id = ? AND e.fingerprint = ? AND e.state = ?
+    AND e.started_at <> ?
+    AND e.started_at < ? AND e.ended_at > ?
+)
 ON CONFLICT (rule_id, fingerprint, started_at, state) DO UPDATE SET
   ended_at = excluded.ended_at`
 	stmt, err := tx.PrepareContext(ctx, q)
@@ -203,9 +238,12 @@ ON CONFLICT (rule_id, fingerprint, started_at, state) DO UPDATE SET
 	defer stmt.Close()
 
 	for _, e := range eps {
-		if _, err := stmt.ExecContext(ctx, e.RuleID, e.Fingerprint, toJSON(e.Labels),
-			unix(e.StartedAt), unix(e.EndedAt), int64(e.Resolution.Seconds()),
-			e.Source, e.State); err != nil {
+		start, end := unix(e.StartedAt), unix(e.EndedAt)
+		if _, err := stmt.ExecContext(ctx,
+			e.RuleID, e.Fingerprint, toJSON(e.Labels), start, end,
+			int64(e.Resolution.Seconds()), e.Source, e.State,
+			e.RuleID, e.Fingerprint, e.State, start, end, start,
+		); err != nil {
 			return fmt.Errorf("insert episode: %w", err)
 		}
 	}

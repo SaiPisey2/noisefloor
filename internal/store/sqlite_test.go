@@ -353,3 +353,146 @@ func TestUpsertRuleObservesChangedExpressionOnly(t *testing.T) {
 		t.Errorf("expr_changed_at = %v, want %v", rules[0].ExprChangedAt, changedAt)
 	}
 }
+
+// TestInsertEpisodesRejectsOverlappingEpisode is the store's own line of
+// defence for issue #15. The collectors keep the sample grid stable so a
+// rescan re-derives identical timestamps, but the grid depends on
+// prometheus.step, which an operator can change between runs, and on the
+// window start, which slides forward every run and re-clips any episode
+// straddling it. Either produces the same firing at a shifted started_at,
+// which the uniqueness key cannot recognise -- so the store rejects it on
+// overlap instead. One series cannot be firing twice at once.
+func TestInsertEpisodesRejectsOverlappingEpisode(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	start := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "A", GroupName: "g", FirstSeen: start, LastSeen: start, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	mk := func(s, e time.Time) Episode {
+		return Episode{
+			RuleID: id, Fingerprint: "fp1", StartedAt: s, EndedAt: e,
+			Resolution: time.Minute, Source: SourceBackfill, State: StateFiring,
+		}
+	}
+
+	original := mk(start, start.Add(10*time.Minute))
+	if err := db.InsertEpisodes(ctx, []Episode{original}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	// The same firing re-observed on a grid shifted by 37s: a different
+	// started_at, so a different uniqueness key, but plainly the same episode.
+	shifted := mk(start.Add(37*time.Second), start.Add(10*time.Minute+37*time.Second))
+	if err := db.InsertEpisodes(ctx, []Episode{shifted}); err != nil {
+		t.Fatalf("InsertEpisodes shifted: %v", err)
+	}
+
+	got, err := db.ListEpisodesInWindow(ctx, start.Add(-time.Hour), start.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d episodes, want 1; an episode overlapping one already "+
+			"stored for the same series is the same firing seen again", len(got))
+	}
+	if !got[0].StartedAt.Equal(original.StartedAt) || !got[0].EndedAt.Equal(original.EndedAt) {
+		t.Errorf("stored episode = %v..%v, want the original %v..%v left alone",
+			got[0].StartedAt, got[0].EndedAt, original.StartedAt, original.EndedAt)
+	}
+}
+
+// TestInsertEpisodesKeepsNonOverlappingAndOtherSeries pins the limits of the
+// overlap rule: it must reject re-observations, never real history. A genuine
+// later firing of the same series, an episode that merely abuts the stored
+// one, and a same-instant episode of a different series or state are all real
+// and must survive.
+func TestInsertEpisodesKeepsNonOverlappingAndOtherSeries(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	start := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "A", GroupName: "g", FirstSeen: start, LastSeen: start, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	mk := func(fp, state string, s, e time.Time) Episode {
+		return Episode{
+			RuleID: id, Fingerprint: fp, StartedAt: s, EndedAt: e,
+			Resolution: time.Minute, Source: SourceBackfill, State: state,
+		}
+	}
+
+	first := mk("fp1", StateFiring, start, start.Add(10*time.Minute))
+	if err := db.InsertEpisodes(ctx, []Episode{first}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	rest := []Episode{
+		// Abuts the stored episode exactly. Episode ends are exclusive
+		// (lastSample+step), so touching is not overlapping.
+		mk("fp1", StateFiring, start.Add(10*time.Minute), start.Add(15*time.Minute)),
+		// A genuine later re-fire of the same series.
+		mk("fp1", StateFiring, start.Add(30*time.Minute), start.Add(35*time.Minute)),
+		// Same instant, different label set: a different series entirely.
+		mk("fp2", StateFiring, start, start.Add(10*time.Minute)),
+		// Same instant and series, but pending rather than firing. A rule is
+		// routinely pending and firing over the same span.
+		mk("fp1", StatePending, start, start.Add(10*time.Minute)),
+	}
+	if err := db.InsertEpisodes(ctx, rest); err != nil {
+		t.Fatalf("InsertEpisodes rest: %v", err)
+	}
+
+	got, err := db.ListEpisodesInWindow(ctx, start.Add(-time.Hour), start.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(got) != 1+len(rest) {
+		t.Fatalf("got %d episodes, want %d; the overlap rule must reject "+
+			"re-observations of one series, not real history", len(got), 1+len(rest))
+	}
+}
+
+// TestInsertEpisodesStillExtendsAnOngoingEpisode keeps the overlap rule from
+// swallowing the upsert it sits in front of. A scan whose window ends mid
+// firing records the episode short; the next scan sees the same started_at and
+// a later end, and that update must still land.
+func TestInsertEpisodesStillExtendsAnOngoingEpisode(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	start := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "A", GroupName: "g", FirstSeen: start, LastSeen: start, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	mk := func(e time.Time) Episode {
+		return Episode{
+			RuleID: id, Fingerprint: "fp1", StartedAt: start, EndedAt: e,
+			Resolution: time.Minute, Source: SourceBackfill, State: StateFiring,
+		}
+	}
+
+	if err := db.InsertEpisodes(ctx, []Episode{mk(start.Add(5 * time.Minute))}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+	longer := start.Add(20 * time.Minute)
+	if err := db.InsertEpisodes(ctx, []Episode{mk(longer)}); err != nil {
+		t.Fatalf("re-InsertEpisodes: %v", err)
+	}
+
+	got, err := db.ListEpisodesInWindow(ctx, start.Add(-time.Hour), start.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d episodes, want 1", len(got))
+	}
+	if !got[0].EndedAt.Equal(longer) {
+		t.Errorf("ended_at = %v, want %v; an episode still running at the end "+
+			"of the last scan must be extendable", got[0].EndedAt, longer)
+	}
+}

@@ -35,10 +35,12 @@ var (
 )
 
 type BackfillResult struct {
-	// WindowStart and WindowEnd are always the window that was REQUESTED. The
-	// backfiller never shortens it: Prometheus returns nothing outside
-	// retention anyway, so querying the whole of it costs nothing and cannot
-	// discard data.
+	// WindowStart and WindowEnd are the requested window snapped to the step
+	// grid -- each rounded DOWN to a multiple of prometheus.step, by at most
+	// one step. The backfiller never shortens it beyond that: Prometheus
+	// returns nothing outside retention anyway, so querying the whole of it
+	// costs nothing and cannot discard data. See Run for why the snapping
+	// exists.
 	WindowStart time.Time
 	WindowEnd   time.Time
 
@@ -99,6 +101,15 @@ type seriesKey struct {
 // under its real group, and every episode stays attached to the inactive
 // orphan and is never scored.
 //
+// Run snaps [from, to) down to the step grid before querying, so two Runs
+// started within the same step query an identical sample grid. Prometheus
+// aligns a range query's samples to the query start, and shifted samples
+// rebuild into episodes with shifted started_at values, which the store's
+// UNIQUE (rule_id, fingerprint, started_at, state) records as new rows rather
+// than upserting -- storing the same firings twice. cmd/noisefloor already
+// passes an aligned window; Run holds the invariant itself because it is
+// exported and nothing in its signature makes the requirement visible.
+//
 // On error the returned BackfillResult is partial but never zero: it describes
 // what had been done when the error occurred.
 func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResult, error) {
@@ -113,10 +124,18 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 			fmt.Errorf("prometheus.chunk must be positive, got %v", b.cfg.Prometheus.Chunk)
 	}
 
-	res := BackfillResult{WindowStart: from, WindowEnd: to}
-
 	step := b.cfg.Prometheus.Step.Std()
 	chunk := b.cfg.Prometheus.Chunk.Std()
+
+	// Snap to the step grid -- see Run's doc comment. Truncate is against
+	// absolute time since the zero instant, so it is the same grid on every
+	// run and in every process. Guarded because Run accepts an unvalidated
+	// Config and a non-positive step would make Truncate a no-op anyway.
+	if step > 0 {
+		from, to = from.Truncate(step), to.Truncate(step)
+	}
+
+	res := BackfillResult{WindowStart: from, WindowEnd: to}
 
 	// Accumulate per-series intervals across chunks, then stitch, so an
 	// episode spanning a boundary is not reported as two.

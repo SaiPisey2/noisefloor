@@ -220,6 +220,20 @@ and deliberately healthy alerts, then seeds 30 days of history.
 
 - Episode precision is bounded by the query step; alerts shorter than one step
   are undercounted.
+- The scan window ends on a `prometheus.step` boundary, so it can lag the
+  moment you ran the scan by up to one step. That is deliberate: Prometheus
+  aligns a range query's samples to the query start, so an unanchored window
+  returns the same firings at shifted timestamps, and the store records them
+  as additional episodes rather than the ones it already holds. Anchoring the
+  window keeps repeated scans -- the intended usage -- returning the same
+  verdicts.
+- An episode that overlaps one already stored for the same rule, labelset and
+  state is discarded rather than added: one series cannot be firing twice at
+  once, so an overlap is the same firing observed again at a different
+  resolution or window offset. What was stored first is kept, at the step it
+  was first recorded with, so changing `prometheus.step` between scans does
+  not double-count history. Delete the database to re-derive it at the new
+  step.
 - A chunk that still fails after every retry attempt aborts the scan, same as
   before retries existed -- retry absorbs transient failures, it does not
   make Prometheus unavailability invisible. Episodes settled in earlier
