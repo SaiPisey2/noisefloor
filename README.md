@@ -34,17 +34,17 @@ This is real output from the demo stack (`make demo-up && make demo-seed`),
 ```
 Window     2026-08-15 to 2026-09-14  (30d)
 Rules      8 active, 0 inactive
-Episodes   6388
+Episodes   6763
 Silences   0
 
-NOISE  CONF  VERDICT   GROUP  RULE           FIRES  SHORT  SILENCED  FLAP  COFIRE  CONC  NIGHT
-51     1.0   tune      demo   DemoFlapping   3667   100%   0%        100%  7%      0%    1%
-45     1.0   retire    demo   DemoCauseA     567    100%   0%        0%    100%    0%    0%
-45     1.0   retire    demo   DemoCauseB     567    100%   0%        0%    100%    0%    0%
-45     1.0   retire    demo   DemoCauseC     567    100%   0%        0%    100%    0%    0%
-45     1.0   retire    demo   DemoCauseD     567    100%   0%        0%    100%    0%    0%
-31     1.0   retire    demo   DemoSpiky      418    100%   0%        0%    7%      0%    0%
-1      1.0   automate  demo   DemoSustained  28     0%     0%        0%    7%      0%    0%
+NOISE  CONF  VERDICT   GROUP  RULE           FIRES  P50  SHORT  SILENCED  FLAP  COFIRE  CONC  CHURN  NIGHT
+51     0.8   tune      demo   DemoFlapping   3885   4m   100%   0%        100%  7%      0%    0%     1%
+45     0.8   retire    demo   DemoCauseA     602    3m   100%   0%        0%    100%    0%    0%     0%
+45     0.8   retire    demo   DemoCauseB     602    3m   100%   0%        0%    100%    0%    0%     0%
+45     0.8   retire    demo   DemoCauseC     602    3m   100%   0%        0%    100%    0%    0%     0%
+45     0.8   retire    demo   DemoCauseD     602    3m   100%   0%        0%    100%    0%    0%     0%
+31     0.8   retire    demo   DemoSpiky      440    3m   100%   0%        0%    7%      0%    0%     0%
+3      0.8   automate  demo   DemoSustained  29     1h   3%     0%        0%    7%      0%    0%     10%
 ```
 
 This is the output of `make demo-up && make demo-seed && noisefloor scan`;
@@ -58,10 +58,12 @@ periods, and stays `automate` -- never `retire` -- because it is the one rule
 in the set worth a runbook, not a deletion. `DemoQuiet` never fires and does
 not appear at all.
 
-NIGHT reads near zero for every demo rule because the seeded fires are spread
-evenly around the clock. That is the correct answer: the column measures
-*disproportionately* nocturnal firing, so a rule that pages as often at 3pm as
-at 3am scores 0 on it. See the column notes below.
+NIGHT reads at or near zero for every demo rule because the seeded fires are
+spread evenly around the clock. That is the correct answer: the column
+measures *disproportionately* nocturnal firing, so a rule that pages as often
+at 3pm as at 3am scores 0 on it; a low-fire rule like `DemoSustained` (29
+fires) shows more sampling variance around that zero than the high-volume
+rules. See the column notes below.
 
 ## What the columns mean
 
