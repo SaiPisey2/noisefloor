@@ -67,6 +67,17 @@ type RuleEval struct {
 	// when.
 	SilencedBy []store.Silence
 
+	// SilencesAvailable mirrors report.Meta.SilencesAvailable: whether
+	// Alertmanager was actually reachable for this scan. False means
+	// Signals.SilencedRate reads 0 and SilencedBy is empty because the data
+	// was never fetched, not because the rule was never silenced.
+	//
+	// Carried per-eval (rather than left in Meta, which only `scan`'s report
+	// reads) because a remediation PR body states silenced_rate to a
+	// stranger as a measured fact, and has to be able to tell the two cases
+	// apart to avoid asserting a number nobody measured.
+	SilencesAvailable bool
+
 	// Ambiguous mirrors collect.RuleSyncResult.AmbiguousNames: this alert
 	// name is defined in more than one rule group, so its episodes cannot be
 	// attributed and it was never scored (Signals/Noise/Confidence/Verdict
@@ -103,6 +114,9 @@ type ScoreInput struct {
 	// step-aligned scan boundary, which can differ from Now by up to one
 	// step (see cmd/noisefloor's scanWindow).
 	QueryStart, QueryEnd time.Time
+	// SilencesAvailable is whether Alertmanager was reachable for this scan;
+	// it is copied onto every RuleEval. See RuleEval.SilencesAvailable.
+	SilencesAvailable bool
 	// ObservedWindow is how long this scan actually has evidence for
 	// (QueryEnd - QueryStart, or QueryEnd - EarliestData when the backfill
 	// was truncated) -- what score.Evaluate measures confidence against.
@@ -145,7 +159,10 @@ func Score(ctx context.Context, db scoreStore, in ScoreInput) (ScoreOutput, erro
 
 	var out ScoreOutput
 	for _, r := range in.Rules {
-		eval := RuleEval{Rule: r, WindowStart: in.QueryStart, WindowEnd: in.QueryEnd}
+		eval := RuleEval{
+			Rule: r, WindowStart: in.QueryStart, WindowEnd: in.QueryEnd,
+			SilencesAvailable: in.SilencesAvailable,
+		}
 		if loc, ok := in.Locations[remediate.RuleKey{Group: r.GroupName, AlertName: r.AlertName}]; ok {
 			eval.Location = loc
 			eval.HasLocation = true
@@ -383,7 +400,8 @@ func RunFull(ctx context.Context, cfg config.Config, db *store.SQLite, api prom.
 		Rules: rules, AllEpisodes: allEpisodes, Silences: silences,
 		AmbiguousNames: ruleSync.AmbiguousNames, Locations: locations,
 		QueryStart: backfill.WindowStart, QueryEnd: backfill.WindowEnd,
-		ObservedWindow: observedWindow, Now: now, Cfg: cfg,
+		SilencesAvailable: silencesAvailable,
+		ObservedWindow:    observedWindow, Now: now, Cfg: cfg,
 	})
 	if err != nil {
 		return FullResult{}, err

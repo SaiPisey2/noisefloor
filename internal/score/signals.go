@@ -186,6 +186,13 @@ func Compute(in Input) Signals {
 	return s
 }
 
+// ShortLivedThreshold is shortLivedThreshold, exported because a PR body
+// has to STATE the threshold it measured against, not just the percentage
+// that fell under it. The threshold is not a constant (it scales with the
+// rule's own for:), so a reviewer handed only "68% were short-lived" has no
+// way to reproduce the figure. See internal/pr's RetireBody.
+func ShortLivedThreshold(r store.Rule) time.Duration { return shortLivedThreshold(r) }
+
 // shortLivedThreshold is the duration below which an episode had no time to be
 // acted on. It scales mildly with for:, because a rule that waits 10 minutes
 // before firing makes a different claim about urgency than one that fires

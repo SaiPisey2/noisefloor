@@ -71,6 +71,16 @@ const (
 	ReasonRetuned       RefusalReason = "retuned inside the observation window"
 	ReasonLowConfidence RefusalReason = "confidence is below the floor"
 	ReasonNoLocation    RefusalReason = "rule location is unknown (rules.path not configured, or the rule was not found under it)"
+	// ReasonDuplicate covers what ReasonAmbiguous structurally cannot: the
+	// same alert name defined twice inside ONE group, which is legal
+	// Prometheus and which collect.SyncRules' cross-group check never sees.
+	// Editing either definition would be a coin toss.
+	ReasonDuplicate RefusalReason = "ambiguous: the checkout defines this (group, alertname) more than once"
+	// ReasonDrift is the stale-checkout guard. The evidence in the PR body
+	// is measured against the rule Prometheus evaluates; the diff is made
+	// against the rule the file holds. If those two are not the same rule,
+	// the PR argues one case and performs a different edit.
+	ReasonDrift RefusalReason = "the checkout does not match the rule prometheus evaluates"
 )
 
 // Refusal is why Build declined to propose a change for one rule.
@@ -108,6 +118,13 @@ func (r Refusal) String() string {
 // explicit, independently testable refusal because issue #8 names it as
 // its own condition, and because scanner and score are not guaranteed to
 // stay coupled that tightly forever.
+//
+// The last two conditions -- ReasonDuplicate and ReasonDrift -- are about
+// the checkout rather than the rule's history, so they are checked after a
+// location is known to exist. Both answer the same question from different
+// directions: is the rule in this file the rule the evidence above is
+// about? A duplicated key means there is no single answer; drift means the
+// answer is no.
 func Build(eval scanner.RuleEval) (*Proposal, *Refusal, error) {
 	group, name := eval.Rule.GroupName, eval.Rule.AlertName
 
@@ -131,6 +148,20 @@ func Build(eval scanner.RuleEval) (*Proposal, *Refusal, error) {
 	if !eval.HasLocation {
 		return nil, &Refusal{group, name, ReasonNoLocation, ""}, nil
 	}
+	if eval.Location.Duplicate {
+		return nil, &Refusal{group, name, ReasonDuplicate,
+			fmt.Sprintf("see %s:%d", eval.Location.File, eval.Location.StartLine)}, nil
+	}
+
+	// The last thing checked before an edit is described, because it is the
+	// only check about the FILE rather than about the rule's history: every
+	// number above came from Prometheus, and this asks whether the file on
+	// disk is still the rule those numbers describe. A stale checkout passes
+	// every other gate.
+	if detail, drift := remediate.DriftAgainst(eval.Location, eval.Rule.Expr, eval.Rule.For); drift {
+		return nil, &Refusal{group, name, ReasonDrift,
+			fmt.Sprintf("%s:%d: %s", eval.Location.File, eval.Location.StartLine, detail)}, nil
+	}
 
 	switch eval.Verdict {
 	case score.VerdictRetire:
@@ -149,8 +180,13 @@ func evidenceFrom(eval scanner.RuleEval) Evidence {
 		ShortLivedRate: eval.Signals.ShortLivedRate,
 		SilencedRate:   eval.Signals.SilencedRate,
 		Confidence:     eval.Confidence,
-		WindowStart:    eval.WindowStart, WindowEnd: eval.WindowEnd,
-		SilencedBy: eval.SilencedBy,
+		// Taken from score, not re-derived: the body must quote the exact
+		// threshold the percentage above it was measured against.
+		ShortLivedThreshold: score.ShortLivedThreshold(eval.Rule),
+		RuleFor:             eval.Rule.For,
+		WindowStart:         eval.WindowStart, WindowEnd: eval.WindowEnd,
+		SilencedBy:        eval.SilencedBy,
+		SilencesAvailable: eval.SilencesAvailable,
 	}
 }
 
