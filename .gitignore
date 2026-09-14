@@ -1,0 +1,21 @@
+# local docs and planning
+docs/
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# build output
+/noisefloor
+/dist/
+*.exe
+
+# local state
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
