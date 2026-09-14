@@ -153,7 +153,15 @@ and deliberately healthy alerts, then seeds 30 days of history.
   one rule on both histories would produce a confident verdict about the wrong
   rule.
 - Rules that no longer exist keep their history but are never scored or
-  proposed for change.
+  proposed for change. If a new rule is later created with the same alert name
+  as a deleted one, it inherits the deleted rule's episodes -- the `ALERTS`
+  series cannot distinguish them -- and will be scored on that history as
+  though it were its own.
+- Confidence is measured from the episodes reconstructed in the current run.
+  A database that has outlived Prometheus retention still scores rules on
+  everything it has stored, but caps their confidence at the span Prometheus
+  can still answer for. On a quiet install this shortens confidence windows
+  slightly. Both effects err toward `keep`, never toward proposing a deletion.
 - A rule whose expression changed inside the window is shown but not given a
   verdict. Its history belongs to the old expression.
 - Tolerating a one-sample gap slightly inflates episode duration and slightly
