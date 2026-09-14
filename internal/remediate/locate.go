@@ -6,7 +6,10 @@
 package remediate
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,11 +37,17 @@ type RuleLocation struct {
 
 	// StartLine and EndLine bound the whole rule entry -- from its opening
 	// `- alert:` line (or whichever field is written first) through the
-	// last line that belongs to it, before the next rule, the next group,
-	// or the next top-level key begins. The span is a next-sibling
-	// boundary, not a tight fit: trailing blank lines or comments between
-	// this rule and whatever follows are counted as part of it, which is
-	// the same ambiguity a human reading the file has.
+	// last line that carries content of this rule's own.
+	//
+	// EndLine is deliberately NOT the next-sibling boundary. YAML gives no
+	// end position, so the next rule's (or group's) first line is the only
+	// structural bound available -- but everything between this rule's last
+	// field and that bound is blank lines and comments that, to a human
+	// reading the file, introduce what FOLLOWS. A retire deletes this span,
+	// and deleting another team's doc comments is not a minimal diff, so
+	// the span is trimmed back off those trailing lines. The same trim
+	// keeps the last rule in a file from swallowing trailing top-level
+	// comments all the way to EOF.
 	StartLine int
 	EndLine   int
 
@@ -52,6 +61,26 @@ type RuleLocation struct {
 	// Prometheus rules use for anything non-trivial.
 	ExprLine    int
 	ExprEndLine int
+
+	// ExprValue and ForValue are the rule's `expr:` and `for:` exactly as
+	// the file writes them (ForValue is "" for a rule with no `for:`).
+	// They exist so a caller can check the rule it is about to edit is
+	// still the rule Prometheus evaluated and noisefloor scored -- see
+	// DriftAgainst. Without that check a stale checkout gets edited against
+	// evidence gathered about a different version of the same rule.
+	ExprValue string
+	ForValue  string
+
+	// Duplicate is true when the scanned checkout defines this exact
+	// (group, alertname) more than once -- twice inside one group (legal in
+	// Prometheus, and invisible to collect.SyncRules' AmbiguousNames, which
+	// only sees the same name across DIFFERENT groups), or once each in two
+	// files. Every location sharing a duplicated key carries the flag, so
+	// whichever one an index keeps still reports it. A caller must refuse to
+	// edit such a rule: there is no way to tell which definition the
+	// evidence belongs to, so a retire would delete, and a tune would
+	// rewrite, an arbitrary one of them.
+	Duplicate bool
 }
 
 // FileError is a rule file LocateRules could not parse. It is not returned
@@ -121,16 +150,63 @@ func LocateRules(root string) ([]RuleLocation, []FileError, error) {
 	if walkErr != nil {
 		return nil, nil, fmt.Errorf("walk %s: %w", root, walkErr)
 	}
+
+	fileErrs = append(fileErrs, markDuplicates(locs)...)
 	return locs, fileErrs, nil
+}
+
+// markDuplicates flags every location whose (group, alertname) key is
+// defined more than once in the scanned checkout, and reports each clash as
+// a FileError so an operator sees it on stderr as well.
+//
+// Two rules with the same alert name in the SAME group is legal Prometheus
+// and is exactly the case collect.SyncRules' AmbiguousNames cannot see (it
+// compares names across groups). Left undetected, an index keyed by (group,
+// alertname) silently keeps one of them and the bot edits whichever that
+// happened to be.
+func markDuplicates(locs []RuleLocation) []FileError {
+	byKey := make(map[RuleKey][]int, len(locs))
+	for i, l := range locs {
+		byKey[l.Key] = append(byKey[l.Key], i)
+	}
+
+	// Walk locs, not the map: map order is random and these become warnings
+	// a human reads, and diffs between runs.
+	var errs []FileError
+	seen := make(map[RuleKey]bool, len(byKey))
+	for _, l := range locs {
+		idx := byKey[l.Key]
+		if len(idx) < 2 || seen[l.Key] {
+			continue
+		}
+		seen[l.Key] = true
+
+		where := make([]string, 0, len(idx))
+		for _, i := range idx {
+			locs[i].Duplicate = true
+			where = append(where, fmt.Sprintf("%s:%d", locs[i].File, locs[i].StartLine))
+		}
+		errs = append(errs, FileError{
+			Path: l.File,
+			Err: fmt.Errorf(
+				"alert %q is defined %d times in group %q (%s); noisefloor cannot tell which "+
+					"definition the scored history belongs to and will not edit any of them",
+				l.Key.AlertName, len(idx), l.Key.Group, strings.Join(where, ", ")),
+		})
+	}
+	return errs
 }
 
 // LocationsByKey indexes a set of locations by RuleKey, the same way
 // LinesByKey does for just the starting line. internal/scanner and
 // internal/pr use this to attach a rule's full location (file, line span,
 // for:/expr: field positions) to its score, which a remediation PR needs to
-// edit the right lines. Same last-one-wins tie-break as LinesByKey, for the
-// same reason: it mirrors AmbiguousNames, a property of the rule set rather
-// than something this package resolves.
+// edit the right lines.
+//
+// A duplicated key still collapses to one entry -- there is only one slot
+// per key -- but never silently: LocateRules has already set Duplicate on
+// every location sharing that key, so whichever one lands here carries the
+// flag, and a caller refuses to edit it (see pr.ReasonDuplicate).
 func LocationsByKey(locs []RuleLocation) map[RuleKey]RuleLocation {
 	out := make(map[RuleKey]RuleLocation, len(locs))
 	for _, l := range locs {
@@ -158,31 +234,49 @@ func LinesByKey(locs []RuleLocation) map[RuleKey]int {
 // returns (nil, nil) for a YAML file that parses fine but has no `groups:`
 // sequence at its top level -- that is simply not a rule file, not an
 // error.
+//
+// A rule file holding more than one YAML document is refused outright. Rule
+// positions are line numbers into the whole file, but only one document can
+// be located at a time, so the last rule of the located document would take
+// its end bound from the file's end -- i.e. from somewhere inside a
+// document this function never looked at. A retire deleting that span would
+// remove every later document wholesale. There is no useful partial answer
+// here, so this is an error rather than a silent skip.
 func parseRuleFile(path string) ([]RuleLocation, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	docs, err := decodeDocuments(data)
+	if err != nil {
 		return nil, err
 	}
-	if len(doc.Content) == 0 {
-		return nil, nil // empty file
+
+	ruleDocs := 0
+	for _, d := range docs {
+		if _, g := mapEntry(d, "groups"); g != nil && g.Kind == yaml.SequenceNode {
+			ruleDocs++
+		}
 	}
-	root := doc.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return nil, nil
+	if ruleDocs == 0 {
+		return nil, nil // not a rule file (or an empty one)
+	}
+	if len(docs) > 1 {
+		return nil, fmt.Errorf(
+			"rule file contains %d YAML documents (%d of them define `groups:`); noisefloor "+
+				"locates rules by line number within a single document and will not risk "+
+				"editing a span that runs into another document -- split it into one file "+
+				"per document",
+			len(docs), ruleDocs)
 	}
 
+	root := docs[0]
 	groupsIdx, groupsNode := mapEntry(root, "groups")
-	if groupsNode == nil || groupsNode.Kind != yaml.SequenceNode {
-		return nil, nil
-	}
 	_ = groupsIdx // root has no further sibling we need; groups: end is never asked for
 
-	totalLines := countLines(data)
+	lines := fileLines(data)
+	totalLines := len(lines)
 
 	var locs []RuleLocation
 	for gi, groupNode := range groupsNode.Content {
@@ -230,13 +324,19 @@ func parseRuleFile(path string) ([]RuleLocation, error) {
 			} else {
 				loc.EndLine = totalLines
 			}
+			// Trim the next-sibling boundary back onto this rule's own last
+			// line of content, never below what the parser attributes to the
+			// rule itself. See RuleLocation.EndLine.
+			loc.EndLine = trimSpan(lines, nodeEndLine(ruleNode), loc.EndLine)
 
 			if _, forNode := mapEntry(ruleNode, "for"); forNode != nil {
 				loc.ForLine = forNode.Line
+				loc.ForValue = forNode.Value
 			}
 
 			if exprIdx, exprNode := mapEntry(ruleNode, "expr"); exprNode != nil {
 				loc.ExprLine = exprNode.Line
+				loc.ExprValue = exprNode.Value
 				if end := nextSiblingLine(ruleNode, exprIdx); end > 0 {
 					loc.ExprEndLine = end - 1
 				} else {
@@ -244,6 +344,7 @@ func parseRuleFile(path string) ([]RuleLocation, error) {
 					// past the rule's own end.
 					loc.ExprEndLine = loc.EndLine
 				}
+				loc.ExprEndLine = trimSpan(lines, nodeEndLine(exprNode), loc.ExprEndLine)
 			}
 
 			locs = append(locs, loc)
@@ -283,17 +384,102 @@ func nextSiblingLine(container *yaml.Node, idx int) int {
 	return container.Content[idx+1].Line
 }
 
-// countLines is the fallback end-of-file boundary for the last field of the
-// last rule of the last group. A trailing newline is not itself a numbered
-// line, so a file ending "...\n" has one fewer line than raw split count.
-func countLines(data []byte) int {
+// decodeDocuments parses every YAML document in data and returns each
+// document's root node (empty documents dropped). Splitting this out is
+// what lets parseRuleFile SEE that a file holds more than one document:
+// yaml.Unmarshal silently decodes only the first, which is how a rule file
+// shaped `groups: ...\n---\ngroups: ...` used to hand back positions valid
+// in one document and an end bound taken from the whole file.
+func decodeDocuments(data []byte) ([]*yaml.Node, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	var out []*yaml.Node
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		root := &doc
+		if doc.Kind == yaml.DocumentNode {
+			if len(doc.Content) == 0 {
+				continue
+			}
+			root = doc.Content[0]
+		}
+		if root.Kind != yaml.MappingNode {
+			// Not something a rule file is ever shaped like, but it is still
+			// a document: it has to be counted, or a `---`-separated pair
+			// would look like a single document again.
+			out = append(out, root)
+			continue
+		}
+		out = append(out, root)
+	}
+}
+
+// fileLines splits data into its 1-indexed lines (lines[0] is line 1). A
+// trailing newline is not itself a numbered line, so a file ending "...\n"
+// has one fewer line than the raw split count.
+func fileLines(data []byte) []string {
 	lines := strings.Split(string(data), "\n")
-	n := len(lines)
-	if n > 0 && lines[n-1] == "" {
-		n--
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
 	}
-	if n < 1 {
-		n = 1
+	return lines
+}
+
+// trimSpan walks `end` back to the last line at or after `floor` that
+// carries content -- skipping blank lines and whole-line comments, which sit
+// between two rules and belong, to any human reading the file, to the one
+// that follows.
+//
+// floor is the last line the YAML parser itself attributes to the node, so
+// the trim can never cut into the node's own value: a literal block scalar
+// whose final line happens to be a PromQL `#` comment keeps that line.
+func trimSpan(lines []string, floor, end int) int {
+	if end > len(lines) {
+		end = len(lines)
 	}
-	return n
+	if floor < 1 {
+		floor = 1
+	}
+	if end <= floor {
+		return end
+	}
+	for ln := end; ln > floor; ln-- {
+		t := strings.TrimSpace(lines[ln-1])
+		if t != "" && !strings.HasPrefix(t, "#") {
+			return ln
+		}
+	}
+	return floor
+}
+
+// nodeEndLine is the last line a node's own content occupies -- the deepest
+// line the parser attributes to it or to anything nested inside it.
+//
+// yaml.Node carries a start position and no end, which is fine for every
+// node whose value sits on one line. A literal or folded block scalar is
+// the exception: its node Line is the `|`/`>` indicator, and its value then
+// runs for as many lines as the value has. Counting those is what keeps
+// trimSpan from mistaking a block scalar's last line for trailing filler.
+func nodeEndLine(n *yaml.Node) int {
+	if n == nil {
+		return 0
+	}
+	end := n.Line
+	if n.Kind == yaml.ScalarNode && (n.Style == yaml.LiteralStyle || n.Style == yaml.FoldedStyle) {
+		if v := strings.TrimSuffix(n.Value, "\n"); v != "" {
+			end = n.Line + strings.Count(v, "\n") + 1
+		}
+	}
+	for _, c := range n.Content {
+		if e := nodeEndLine(c); e > end {
+			end = e
+		}
+	}
+	return end
 }
