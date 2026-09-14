@@ -28,8 +28,21 @@ func (i Interval) Duration() time.Duration { return i.End.Sub(i.Start) }
 //
 // A gap larger than 2*step closes an episode. Exactly 2*step is tolerated, so
 // a single missed scrape does not split one episode into two.
+//
+// Known bias, deliberate and one-directional: tolerating that gap means samples
+// at 0 and 2*step merge into one episode of 3*step, where the other reading —
+// that the alert genuinely resolved and re-fired — would give two episodes of
+// one step each. Every tolerated gap therefore adds one step of phantom firing
+// time and removes one episode from the count. Flap rate is scored from episode
+// counts, so this biases slightly AGAINST calling a rule flappy. That is the
+// safer direction: under-reporting flapping costs a missed tuning suggestion,
+// while over-reporting it would propose changes to rules that are fine.
 func BuildIntervals(samples []model.SamplePair, step time.Duration) []Interval {
-	if len(samples) == 0 {
+	if len(samples) == 0 || step <= 0 {
+		// A non-positive step would make maxGap zero or negative, splitting
+		// every sample into its own zero- or negative-length interval and
+		// poisoning every duration statistic downstream. config.Validate
+		// rejects it at load, but this function is exported and defensive.
 		return nil
 	}
 
@@ -74,6 +87,12 @@ type SeriesEpisodes struct {
 // SplitMatrix turns an ALERTS matrix into per-series episodes. The synthetic
 // labels __name__, alertname and alertstate are stripped from Labels, since
 // they identify the series rather than describe the alert instance.
+//
+// It assumes one matrix entry per series, which is what a single Prometheus
+// range query returns. It does NOT merge entries, so a caller that queries in
+// chunks must accumulate across calls and stitch episodes spanning a chunk
+// boundary — see the backfiller, which keys an accumulator by
+// (alertname, state, fingerprint) and stitches before persisting.
 func SplitMatrix(m model.Matrix, step time.Duration) []SeriesEpisodes {
 	out := make([]SeriesEpisodes, 0, len(m))
 	for _, series := range m {
@@ -96,8 +115,15 @@ func SplitMatrix(m model.Matrix, step time.Duration) []SeriesEpisodes {
 	return out
 }
 
-// fingerprint is a stable identity for a label set, used to tell one firing
-// instance of a rule from another across scans.
+// fingerprint is a stable identity for a LABEL SET, not for an alert. It is
+// computed after alertname and alertstate are stripped, so two different alerts
+// sharing the same remaining labels produce the same fingerprint.
+//
+// That is intentional: the fingerprint distinguishes one firing instance of a
+// rule from another, and the rule is already identified elsewhere. Callers MUST
+// therefore key by (alertname, state, fingerprint), never by fingerprint alone —
+// which is exactly what the backfiller's seriesKey and the store's
+// UNIQUE (rule_id, fingerprint, started_at, state) both do.
 func fingerprint(labels map[string]string) string {
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
