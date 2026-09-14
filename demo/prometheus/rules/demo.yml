@@ -5,8 +5,12 @@ groups:
   - name: demo
     interval: 15s
     rules:
-      # Fires for 3m every 97m (94m off) and resolves itself. Nobody acts
-      # on it. Expected verdict: retire.
+      # Fires for 3m-6m every 97m (94m+ off) and resolves itself. Nobody acts
+      # on it. Expected verdict: retire when a silence covers the window (see
+      # internal/e2e/scan_test.go); on a plain scan with no silences it reads
+      # `keep` -- the jitter added to this waveform (demo/seed, demo/faultgen)
+      # dropped its noise score just under the retire threshold, which it was
+      # calibrated one point above. See demo/seed/main.go's DemoSpiky comment.
       - alert: DemoSpiky
         expr: demo_spiky_gauge > 0
         labels: {severity: warning}

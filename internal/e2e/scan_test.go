@@ -68,6 +68,11 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 
 	// A rule nobody ever silenced should not be retired on self-resolution
 	// alone, so DemoSpiky needs silence evidence covering the seeded window.
+	// This is no longer merely defensive: DemoSpiky's waveform (demo/seed)
+	// carries deliberate jitter on its on-period, which drops its noise
+	// score to just under the retire threshold on self-resolution alone --
+	// it was calibrated one point above it. The silence below is REQUIRED
+	// for the assertion further down to hold, not a belt-and-braces extra.
 	//
 	// That evidence CANNOT come from Alertmanager's API: it refuses a silence
 	// whose endsAt is in the past ("end time can't be in the past") and
@@ -128,12 +133,11 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 		signals[r.AlertName] = s
 	}
 
-	// DemoSpiky already reaches `retire` on self-resolution alone once the
-	// window is long enough -- the seeded silence only pushes the score
-	// higher, it is not required to cross the threshold. Assert `retire`
-	// either way; what matters is that the silence evidence was fed through
-	// the pipeline correctly (proven above by not erroring), not which signal
-	// happened to carry the verdict.
+	// DemoSpiky no longer reaches `retire` on self-resolution alone (see the
+	// jitter comment above and in demo/seed/main.go): the seeded silence
+	// above is what carries it over the threshold via silenced_rate. What
+	// matters here is that the silence evidence was fed through the pipeline
+	// correctly, proven by the verdict it produces.
 	if got := verdicts["DemoSpiky"]; got != score.VerdictRetire {
 		t.Errorf("DemoSpiky verdict = %q, want retire; it self-resolves within "+
 			"2m, does not flap, and is silenced across the window "+
