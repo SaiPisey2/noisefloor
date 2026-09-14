@@ -59,27 +59,77 @@ func NewInsert(file string, afterLine int, newLine string) Edit {
 	return Edit{File: file, InsertAfter: afterLine, InsertWith: newLine, hasInsert: true}
 }
 
-// Apply reads e.File, applies the edit, and returns the resulting full file
-// content plus a unified-diff-style patch for human review.
-func (e Edit) Apply() (newContent, diff string, err error) {
+// Apply reads e.File, applies the edit, and returns the file's content as
+// it was read, the resulting full content, and a unified-diff-style patch
+// for human review.
+//
+// oldContent is returned rather than left for the caller to read again
+// because it is what the forge provider compares against the blob it is
+// about to overwrite (see Provider.CommitFiles and FileChange.BaseContent).
+// Two separate reads would leave a window in which the file changed between
+// them, which is precisely the state that check exists to detect.
+func (e Edit) Apply() (oldContent, newContent, diff string, err error) {
 	data, err := os.ReadFile(e.File)
 	if err != nil {
-		return "", "", fmt.Errorf("read %s: %w", e.File, err)
+		return "", "", "", fmt.Errorf("read %s: %w", e.File, err)
 	}
 	text := string(data)
 	trailingNewline := strings.HasSuffix(text, "\n")
-	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 
+	// Split on "\n" only, which leaves a CRLF file's "\r" on the end of each
+	// line. That is deliberate: every line this edit does not name then
+	// round-trips byte for byte, including its ending. The one line the edit
+	// DOES write is the one that has to be made to match -- see matchEOL.
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	crlf := dominantCRLF(text)
+
+	var out string
 	switch {
 	case e.DeleteStart > 0:
-		return e.applyDelete(lines, trailingNewline)
+		out, diff, err = e.applyDelete(lines, trailingNewline)
 	case e.ReplaceLine > 0:
-		return e.applyReplace(lines, trailingNewline)
+		e.ReplaceWith = matchEOL(e.ReplaceWith, crlf)
+		out, diff, err = e.applyReplace(lines, trailingNewline)
 	case e.hasInsert:
-		return e.applyInsert(lines, trailingNewline)
+		e.InsertWith = matchEOL(e.InsertWith, crlf)
+		out, diff, err = e.applyInsert(lines, trailingNewline)
 	default:
-		return "", "", fmt.Errorf("edit for %s specifies no change", e.File)
+		err = fmt.Errorf("edit for %s specifies no change", e.File)
 	}
+	if err != nil {
+		return "", "", "", err
+	}
+	return text, out, diff, nil
+}
+
+// dominantCRLF reports whether the file is predominantly CRLF-terminated.
+//
+// Predominantly, not exclusively: a file that is already mixed still has one
+// ending that belongs there, and a single stray line is not a reason to
+// write the minority ending into it. Ties go to LF, which is what a file
+// with no line endings at all (a single line, no trailing newline) should
+// get.
+func dominantCRLF(text string) bool {
+	crlf := strings.Count(text, "\r\n")
+	lf := strings.Count(text, "\n") - crlf
+	return crlf > lf
+}
+
+// matchEOL gives a line this package constructed -- a rewritten `for:` line,
+// or a newly inserted one -- the file's own line ending.
+//
+// Without it, every replaced or inserted line in a CRLF rule file arrives
+// LF-terminated while its neighbours stay CRLF. Git shows that as the line
+// having changed in a way the PR body never mentions, some YAML tooling
+// treats the leftover "\r" of the surrounding lines inconsistently, and a
+// reviewer is left explaining a whitespace-only mystery in someone else's
+// repository. The edit is supposed to be invisible apart from the value.
+func matchEOL(line string, crlf bool) string {
+	line = strings.TrimSuffix(line, "\r")
+	if crlf {
+		return line + "\r"
+	}
+	return line
 }
 
 func join(lines []string, trailingNewline bool) string {

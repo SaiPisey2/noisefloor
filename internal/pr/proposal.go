@@ -33,24 +33,30 @@ type Proposal struct {
 
 	Edit Edit
 
-	// NewContent and Diff are populated by Render, not Build: Build only
-	// describes the edit, Render is what actually reads the file and
-	// applies it (see Edit.Apply). Kept on Proposal so a caller renders
+	// BaseContent, NewContent and Diff are populated by Render, not Build:
+	// Build only describes the edit, Render is what actually reads the file
+	// and applies it (see Edit.Apply). Kept on Proposal so a caller renders
 	// once and reuses the result for both the dry-run printout and, with
 	// -apply, the commit.
-	NewContent string
-	Diff       string
+	//
+	// BaseContent is the file exactly as it was when this edit was computed.
+	// It travels with the proposal all the way to the forge, where it is
+	// the answer to "what did this diff assume it was editing" -- the only
+	// thing that makes NewContent safe to PUT as a whole file.
+	BaseContent string
+	NewContent  string
+	Diff        string
 }
 
-// Render applies p.Edit against the file on disk and fills NewContent and
-// Diff. Safe to call more than once; it re-reads the file each time, so it
-// always reflects the file's current on-disk state.
+// Render applies p.Edit against the file on disk and fills BaseContent,
+// NewContent and Diff. Safe to call more than once; it re-reads the file
+// each time, so it always reflects the file's current on-disk state.
 func (p *Proposal) Render() error {
-	newContent, diff, err := p.Edit.Apply()
+	oldContent, newContent, diff, err := p.Edit.Apply()
 	if err != nil {
 		return err
 	}
-	p.NewContent, p.Diff = newContent, diff
+	p.BaseContent, p.NewContent, p.Diff = oldContent, newContent, diff
 	return nil
 }
 

@@ -1,0 +1,13 @@
+# A CRLF-terminated rule file, the default for a repository checked out on
+# Windows with core.autocrlf=true. Committed with explicit \r\n endings, and
+# .gitattributes marks it binary so nothing normalises them back out.
+groups:
+  - name: crlf
+    rules:
+      - alert: CRLFTuneMe
+        expr: rate(errors_total[5m]) > 0
+        for: 45s
+        labels:
+          team: payments
+      - alert: CRLFNoFor
+        expr: up == 0

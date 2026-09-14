@@ -12,13 +12,14 @@ groups:
           severity: warning
         annotations:
           summary: "always down"
-      # This blank line and comment sit between RetireMe and TuneMe, and
-      # belong to RetireMe's span (remediate.LocateRules' next-sibling
-      # boundary) -- a retire edit is expected to remove them too.
 
+      # This blank line and these four comment lines sit between RetireMe
+      # and TuneMe. They introduce TuneMe; they are not RetireMe's, and a
+      # retire edit must leave every one of them exactly where it is --
+      # deleting another team's comments is not a minimal diff.
       - alert: TuneMe
         expr: rate(errors_total[5m]) > 0
-        for:    45s   # keep this pager quiet during a deploy
+        for:    1m   # keep this pager quiet during a deploy
         labels:
           team: payments
         annotations:

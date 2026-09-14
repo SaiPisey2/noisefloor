@@ -96,7 +96,7 @@ func TestBuildRetireProposal(t *testing.T) {
 	if err := p.Render(); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if strings.Contains(p.NewContent, "RetireMe") {
+	if strings.Contains(p.NewContent, "alert: RetireMe") {
 		t.Error("rendered content still contains the deleted rule")
 	}
 	assertGolden(t, "testdata/golden/retire_body.golden.md", p.Body)
