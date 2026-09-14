@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,12 +26,21 @@ func (s *ruleStore) UpsertRule(_ context.Context, r *store.Rule) (int64, error) 
 		id := existing.ID
 		cp := *r
 		cp.ID = id
+		// Model the store's CASE semantics: only advance expr_changed_at when
+		// the expression hash actually differs.
+		if existing.ExprHash != r.ExprHash {
+			cp.ExprChangedAt = r.LastSeen
+		} else {
+			cp.ExprChangedAt = existing.ExprChangedAt
+		}
 		s.byKey[key] = &cp
 		return id, nil
 	}
 	cp := *r
 	cp.ID = s.nextID
 	s.nextID++
+	// On insert, expr_changed_at is zero: meeting a rule is not observing it change.
+	cp.ExprChangedAt = time.Time{}
 	s.byKey[key] = &cp
 	return cp.ID, nil
 }
@@ -146,5 +156,84 @@ func TestExprHashChangesWithExpression(t *testing.T) {
 	}
 	if len(a) != 16 {
 		t.Errorf("hash length = %d, want 16", len(a))
+	}
+}
+
+func TestSyncRulesWithRealStoreAvoidsFalseRetuneOnFirstScan(t *testing.T) {
+	ctx := context.Background()
+
+	// Open a real SQLite store
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	// First sync: introduce a rule
+	groups := []prom.RuleGroup{{
+		Name: "demo", File: "/etc/prometheus/rules/demo.yml",
+		Alerting: []prom.AlertingRule{{
+			Name: "Test", Query: "up == 0",
+			For: 5 * time.Minute,
+		}},
+	}}
+
+	res, err := SyncRules(ctx, groups, db, now)
+	if err != nil {
+		t.Fatalf("first SyncRules: %v", err)
+	}
+	if res.Active != 1 {
+		t.Errorf("first sync active = %d, want 1", res.Active)
+	}
+
+	rules, _ := db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("after first sync, got %d rules, want 1", len(rules))
+	}
+	if RetunedDuring(rules[0], now) {
+		t.Error("first scan: rule should NOT be marked as retuned (expr_changed_at is zero)")
+	}
+
+	// Second sync: same rule, same expression
+	res, err = SyncRules(ctx, groups, db, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("second SyncRules: %v", err)
+	}
+	if res.Active != 1 {
+		t.Errorf("second sync active = %d, want 1", res.Active)
+	}
+
+	rules, _ = db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("after second sync, got %d rules, want 1", len(rules))
+	}
+	if RetunedDuring(rules[0], now) {
+		t.Error("second scan: rule with unchanged expression should NOT be retuned")
+	}
+
+	// Third sync: same rule, different expression
+	changedGroups := []prom.RuleGroup{{
+		Name: "demo", File: "/etc/prometheus/rules/demo.yml",
+		Alerting: []prom.AlertingRule{{
+			Name: "Test", Query: "up == 1",
+			For: 5 * time.Minute,
+		}},
+	}}
+
+	syncTime := now.Add(2 * time.Hour)
+	res, err = SyncRules(ctx, changedGroups, db, syncTime)
+	if err != nil {
+		t.Fatalf("third SyncRules: %v", err)
+	}
+
+	rules, _ = db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("after third sync, got %d rules, want 1", len(rules))
+	}
+	if !RetunedDuring(rules[0], now) {
+		t.Error("third scan: rule with changed expression SHOULD be retuned")
 	}
 }

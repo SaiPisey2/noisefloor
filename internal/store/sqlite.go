@@ -35,9 +35,19 @@ func Open(path string) (*SQLite, error) {
 
 func (s *SQLite) Close() error { return s.db.Close() }
 
-func unix(t time.Time) int64     { return t.UTC().Unix() }
-func fromUnix(v int64) time.Time { return time.Unix(v, 0).UTC() }
-func toJSON(v any) string        { b, _ := json.Marshal(v); return string(b) }
+func unix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+func fromUnix(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return time.Unix(v, 0).UTC()
+}
+func toJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 func fromJSONMap(s string) map[string]string {
 	m := map[string]string{}
@@ -49,7 +59,7 @@ func (s *SQLite) UpsertRule(ctx context.Context, r *Rule) (int64, error) {
 	const q = `
 INSERT INTO rules (alert_name, group_name, file, line, expr, expr_hash, for_seconds,
                    labels, annotations, first_seen, last_seen, expr_changed_at, active)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)
 ON CONFLICT (group_name, alert_name) DO UPDATE SET
   file        = excluded.file,
   line        = excluded.line,
@@ -61,8 +71,14 @@ ON CONFLICT (group_name, alert_name) DO UPDATE SET
   last_seen   = excluded.last_seen,
   -- Only advance expr_changed_at when the expression actually changed, so a
   -- routine rescan does not look like a retune.
+  --
+  -- The INSERT above writes 0, never a timestamp: on first sight we have not
+  -- OBSERVED this rule change, we have merely met it. Writing a timestamp
+  -- there would mark every rule in a fresh database as retuned, and the caller
+  -- withholds verdicts from retuned rules, so the very first scan would
+  -- report nothing but keep at zero confidence for every rule.
   expr_changed_at = CASE
-    WHEN rules.expr_hash != excluded.expr_hash THEN excluded.expr_changed_at
+    WHEN rules.expr_hash != excluded.expr_hash THEN excluded.last_seen
     ELSE rules.expr_changed_at
   END,
   active      = excluded.active
@@ -71,7 +87,7 @@ RETURNING id`
 	err := s.db.QueryRowContext(ctx, q,
 		r.AlertName, r.GroupName, r.File, r.Line, r.Expr, r.ExprHash,
 		int64(r.For.Seconds()), toJSON(r.Labels), toJSON(r.Annotations),
-		unix(r.FirstSeen), unix(r.LastSeen), unix(r.ExprChangedAt), r.Active,
+		unix(r.FirstSeen), unix(r.LastSeen), r.Active,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert rule %s/%s: %w", r.GroupName, r.AlertName, err)

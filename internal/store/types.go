@@ -23,8 +23,13 @@ type Rule struct {
 	Annotations map[string]string
 	FirstSeen   time.Time
 	LastSeen    time.Time
-	// ExprChangedAt is when this rule's expression last changed. A retuned
-	// rule must not inherit the verdict earned by its old expression.
+	// ExprChangedAt is when this rule's expression was last OBSERVED to change.
+	// Zero means never observed changing, which includes every rule on its
+	// first sync -- meeting a rule is not the same as watching it change.
+	//
+	// Read-only from the caller's side: UpsertRule ignores whatever is passed
+	// here and maintains the column itself, writing zero on insert and the
+	// observation time only when the expression hash actually differs.
 	ExprChangedAt time.Time
 	Active        bool
 }

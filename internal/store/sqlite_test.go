@@ -285,3 +285,72 @@ func TestMarkRulesInactive(t *testing.T) {
 		}
 	}
 }
+
+func TestUpsertRuleObservesChangedExpressionOnly(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	base := time.Unix(1_700_000_000, 0).UTC()
+
+	// First upsert: rule with expression A
+	// In production, ExprHash would come from the collect package,
+	// but we use a simple stable hash here for testing.
+	hashA := "hashA"
+	hashB := "hashB"
+
+	r1 := &Rule{
+		AlertName: "Test", GroupName: "g",
+		Expr:      "up == 0",
+		ExprHash:  hashA,
+		FirstSeen: base, LastSeen: base,
+		Active: true,
+	}
+	_, _ = db.UpsertRule(ctx, r1)
+
+	rules, _ := db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1", len(rules))
+	}
+	if !rules[0].ExprChangedAt.IsZero() {
+		t.Error("new rule should have zero expr_changed_at on insert")
+	}
+
+	// Second upsert: same rule, same expression, different LastSeen
+	r2 := &Rule{
+		AlertName: "Test", GroupName: "g",
+		Expr:      "up == 0",
+		ExprHash:  hashA,
+		FirstSeen: base, LastSeen: base.Add(time.Hour),
+		Active: true,
+	}
+	_, _ = db.UpsertRule(ctx, r2)
+
+	rules, _ = db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1", len(rules))
+	}
+	if !rules[0].ExprChangedAt.IsZero() {
+		t.Error("expr_changed_at should stay zero when expression doesn't change")
+	}
+
+	// Third upsert: same rule, different expression
+	changedAt := base.Add(2 * time.Hour)
+	r3 := &Rule{
+		AlertName: "Test", GroupName: "g",
+		Expr:      "up == 1",
+		ExprHash:  hashB,
+		FirstSeen: base, LastSeen: changedAt,
+		Active: true,
+	}
+	_, _ = db.UpsertRule(ctx, r3)
+
+	rules, _ = db.ListRules(ctx)
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1", len(rules))
+	}
+	if rules[0].ExprChangedAt.IsZero() {
+		t.Error("expr_changed_at should be set when expression changes")
+	}
+	if !rules[0].ExprChangedAt.Equal(changedAt) {
+		t.Errorf("expr_changed_at = %v, want %v", rules[0].ExprChangedAt, changedAt)
+	}
+}

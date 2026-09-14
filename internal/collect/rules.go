@@ -17,6 +17,9 @@ type RuleStore interface {
 	MarkRulesInactive(ctx context.Context, keep []int64) error
 }
 
+// An interface nothing asserts against is an interface that silently rots.
+var _ RuleStore = (*store.SQLite)(nil)
+
 type RuleSyncResult struct {
 	Active      int
 	Deactivated int
@@ -29,10 +32,14 @@ func ExprHash(expr string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// RetunedDuring reports whether a rule's expression changed inside the scoring
-// window. If it did, its stored episodes were produced by an expression that no
-// longer exists, and scoring the current rule on them would judge it for
-// someone else's behaviour.
+// RetunedDuring reports whether a rule's expression was observed to change
+// inside the scoring window. If it was, its stored episodes were produced by an
+// expression that no longer exists, and scoring the current rule on them would
+// judge it for someone else's behaviour.
+//
+// A zero ExprChangedAt means the change was never observed -- which is the case
+// for every rule on a first scan. Those are NOT retuned: we have simply never
+// seen them any other way.
 func RetunedDuring(r store.Rule, windowStart time.Time) bool {
 	return !r.ExprChangedAt.IsZero() && r.ExprChangedAt.After(windowStart)
 }
@@ -63,10 +70,11 @@ func SyncRules(ctx context.Context, groups []prom.RuleGroup, db RuleStore, now t
 				Annotations: r.Annotations,
 				FirstSeen:   now,
 				LastSeen:    now,
-				// The store only advances this when the hash actually
-				// differs from what it already holds.
-				ExprChangedAt: now,
-				Active:        true,
+				// ExprChangedAt is deliberately not set. The store owns that
+				// column: zero on insert, and the observation time only when
+				// the expression hash actually differs. Passing `now` here
+				// would mark every rule in a fresh database as retuned.
+				Active: true,
 			})
 			if err != nil {
 				return res, fmt.Errorf("upsert rule %s/%s: %w", g.Name, r.Name, err)
