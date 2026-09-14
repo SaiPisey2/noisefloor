@@ -31,6 +31,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Database != "noisefloor.db" {
 		t.Errorf("database = %q, want noisefloor.db", cfg.Database)
 	}
+	if cfg.FlapWindow.Std() != time.Hour {
+		t.Errorf("flap_window = %v, want the unchanged default of 1h", cfg.FlapWindow.Std())
+	}
 }
 
 func TestLoadOverridesDefaults(t *testing.T) {
@@ -76,6 +79,24 @@ func TestLoadRejectsChunkSmallerThanStep(t *testing.T) {
 	path := writeTemp(t, body)
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load succeeded with chunk < step, want error")
+	}
+}
+
+func TestLoadOverridesFlapWindow(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\nflap_window: 15m\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.FlapWindow.Std() != 15*time.Minute {
+		t.Errorf("flap_window = %v, want 15m", cfg.FlapWindow.Std())
+	}
+}
+
+func TestLoadRejectsNonPositiveFlapWindow(t *testing.T) {
+	path := writeTemp(t, "prometheus:\n  url: http://localhost:9090\nflap_window: 0s\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with flap_window = 0, want error")
 	}
 }
 

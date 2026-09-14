@@ -60,6 +60,12 @@ weights:
   cofire_ratio: 0.15
   offhours_rate: 0.10
 
+# How soon a re-fire on the same series counts as flapping (feeds flap_rate,
+# weighted above). 1h is the long-standing default; lower it for rules that
+# should never legitimately re-fire within the hour, or raise it if hourly
+# paging is normal for your environment.
+flap_window: 1h
+
 confidence:
   min_episodes: 10
   min_window: 14d
@@ -301,6 +307,7 @@ func runScan(args []string) error {
 			AllEpisodes: allEpisodes,
 			Silences:    silences,
 			Location:    cfg.Location(),
+			FlapWindow:  cfg.FlapWindow.Std(),
 		})
 		noise, confidence, verdict := score.Evaluate(signals, r, window, now, cfg)
 

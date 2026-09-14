@@ -96,6 +96,25 @@ func TestFlapRateGroupsByFingerprint(t *testing.T) {
 	closeTo(t, "flap_rate interleaved fingerprints", s.FlapRate, 0)
 }
 
+// TestFlapWindowIsConfigurable pins issue #7: flapWindow used to be a fixed
+// 1h constant, so any rule firing more than hourly read as flapping no
+// matter what the operator wanted. The same two episodes here score as a
+// flap under the default window and not under a narrower configured one.
+func TestFlapWindowIsConfigurable(t *testing.T) {
+	eps := []store.Episode{
+		ep(1, "a", 0, 5*time.Minute),
+		ep(1, "a", 35*time.Minute, 5*time.Minute), // 30m gap after the first ends
+	}
+	def := Compute(Input{Rule: rule(0), Episodes: eps, Location: time.UTC})
+	closeTo(t, "flap_rate with default window", def.FlapRate, 0.5)
+
+	narrow := Compute(Input{
+		Rule: rule(0), Episodes: eps, Location: time.UTC,
+		FlapWindow: 10 * time.Minute,
+	})
+	closeTo(t, "flap_rate with a 10m window", narrow.FlapRate, 0)
+}
+
 func TestSilencedRateIsFractionOfFiringTime(t *testing.T) {
 	eps := []store.Episode{ep(1, "a", 0, time.Hour)}
 	sils := []store.Silence{{

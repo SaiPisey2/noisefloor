@@ -21,7 +21,10 @@ const (
 	// five-hour episode on a `for: 2h` rule as too short to act on --
 	// penalising precisely the rules whose authors already tuned them.
 	shortLivedCap = 30 * time.Minute
-	// flapWindow is how soon a re-fire on the same series counts as flapping.
+	// flapWindow is the default for how soon a re-fire on the same series
+	// counts as flapping. Callers override it via Input.FlapWindow; this is
+	// only the fallback when that is left zero, which keeps every existing
+	// caller (including every test in this package) unchanged.
 	flapWindow = time.Hour
 	// cofireWindow is how close two rules must fire to count as co-firing.
 	cofireWindow = 2 * time.Minute
@@ -100,6 +103,11 @@ type Input struct {
 	AllEpisodes []store.Episode // every rule's episodes, for co-fire detection
 	Silences    []store.Silence
 	Location    *time.Location
+
+	// FlapWindow is how soon a re-fire on the same series counts as flapping.
+	// Zero means "use the default" (flapWindow, 1h), so existing callers that
+	// never set it keep today's behaviour unchanged.
+	FlapWindow time.Duration
 }
 
 func Compute(in Input) Signals {
@@ -120,6 +128,11 @@ func Compute(in Input) Signals {
 			// firing would inflate Fires and the denominator of every scored
 			// rate, quietly diluting all of them.
 		}
+	}
+
+	fw := in.FlapWindow
+	if fw <= 0 {
+		fw = flapWindow
 	}
 
 	s := Signals{Fires: len(firing)}
@@ -161,7 +174,7 @@ func Compute(in Input) Signals {
 	s.P90Duration = percentile(durations, 0.90)
 	s.ShortLivedRate = shortLived / n
 	s.OffhoursRate = normaliseOffHours(offhours / n)
-	s.FlapRate = flapRate(byFingerprint, len(firing))
+	s.FlapRate = flapRate(byFingerprint, len(firing), fw)
 	s.CofireRatio = cofireRatio(firing, in.AllEpisodes, in.Rule.ID)
 	s.Concentration = concentration(byFingerprint)
 	s.PendingChurn = pendingChurn(pending, firing)
@@ -215,7 +228,7 @@ func isOffHours(t time.Time) bool {
 	return h < businessStartHour || h >= businessEndHour
 }
 
-func flapRate(byFingerprint map[string][]store.Episode, total int) float64 {
+func flapRate(byFingerprint map[string][]store.Episode, total int, window time.Duration) float64 {
 	if total == 0 {
 		return 0
 	}
@@ -226,7 +239,7 @@ func flapRate(byFingerprint map[string][]store.Episode, total int) float64 {
 			return sorted[i].StartedAt.Before(sorted[j].StartedAt)
 		})
 		for i := 1; i < len(sorted); i++ {
-			if sorted[i].StartedAt.Sub(sorted[i-1].EndedAt) <= flapWindow {
+			if sorted[i].StartedAt.Sub(sorted[i-1].EndedAt) <= window {
 				refires++
 			}
 		}

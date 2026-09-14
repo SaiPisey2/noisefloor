@@ -87,7 +87,8 @@ at 3am scores 0 on it. See the column notes below.
   verdict cites a number nowhere else in the row.
 - **SHORT** -- episodes that resolved themselves before anyone could act.
 - **SILENCED** -- firing time a human had explicitly silenced.
-- **FLAP** -- re-fires on the same series within an hour.
+- **FLAP** -- re-fires on the same series within `flap_window` (default 1h,
+  configurable -- see Configuration below).
 - **COFIRE** -- episodes that started alongside three or more other rules, which
   is what a cause-based alert riding someone else's incident looks like.
 - **CONC** -- concentration: how much of the firing time sits on a small
@@ -135,6 +136,23 @@ sum you can read.
 fires count as off-hours, which is a scored signal, so `Local` would let the
 same database produce different verdicts on a CET laptop and in a UTC CI
 container. Set your team's working timezone if it is not UTC.
+
+`flap_window` decides how soon a re-fire on the same series counts as
+flapping (feeds `flap_rate`, weighted above). It defaults to `1h`, unchanged
+from before this was configurable. It is a fixed, absolute duration, not
+scaled by episode length: a rule whose episodes are typically 30 minutes long
+and a rule whose episodes are typically 30 seconds long use the same 1h
+window unless you set this per-deployment. Scaling the window by episode
+duration was considered -- a 30-minute episode recurring hourly arguably
+isn't flapping, while a 30-second one clearly is -- but was judged too risky
+to default: the natural formula (scale off the rule's own P50 duration)
+creates a feedback loop, since P50 is itself computed over episodes whose
+boundaries already depend on the gap-merging tolerance in `BuildIntervals`,
+and it would silently invalidate the archetype calibration in
+`internal/score/verdict.go` (`flapTuneThreshold` was tuned against an
+absolute 1h). `flap_window` is therefore a single global knob, not scaled per
+rule: widen it if your rules' normal episodes commonly run well over an hour,
+narrow it if they normally run in seconds.
 
 ## Authentication
 

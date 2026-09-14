@@ -121,6 +121,7 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 		s := score.Compute(score.Input{
 			Rule: r, Episodes: eps, AllEpisodes: all,
 			Silences: silences, Location: time.UTC,
+			FlapWindow: cfg.FlapWindow.Std(),
 		})
 		_, _, v := score.Evaluate(s, r, window, now, cfg)
 		verdicts[r.AlertName] = v

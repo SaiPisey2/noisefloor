@@ -18,7 +18,13 @@ type Config struct {
 	Timeout      Duration     `yaml:"timeout"`
 	Timezone     string       `yaml:"timezone"`
 	Weights      Weights      `yaml:"weights"`
-	Confidence   Confidence   `yaml:"confidence"`
+	// FlapWindow is how soon a re-fire on the same series counts as flapping,
+	// which feeds flap_rate. It sits alongside the weights because it shapes
+	// the same signal they score: an operator tuning flap_rate's weight needs
+	// to see, and be able to change, what "flapping" itself means. Defaults to
+	// 1h, unchanged from before this was configurable.
+	FlapWindow Duration   `yaml:"flap_window"`
+	Confidence Confidence `yaml:"confidence"`
 }
 
 type Prometheus struct {
@@ -97,6 +103,7 @@ func Default() Config {
 			CofireRatio:    0.15,
 			OffhoursRate:   0.10,
 		},
+		FlapWindow: Duration(time.Hour),
 		Confidence: Confidence{
 			MinEpisodes: 10,
 			MinWindow:   Duration(14 * 24 * time.Hour),
@@ -141,6 +148,9 @@ func (c Config) Validate() error {
 	}
 	if sum := c.Weights.Sum(); math.Abs(sum-1.0) > 0.001 {
 		return fmt.Errorf("weights must sum to 1.0, got %.3f", sum)
+	}
+	if c.FlapWindow.Std() <= 0 {
+		return fmt.Errorf("flap_window must be positive")
 	}
 	if c.Confidence.MinEpisodes < 1 {
 		return fmt.Errorf("confidence.min_episodes must be >= 1")
