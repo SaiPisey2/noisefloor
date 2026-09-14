@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,9 +24,24 @@ const sampleConfig = `prometheus:
   url: http://localhost:9090
   step: 1m
   chunk: 6h
+  # Prometheus and Alertmanager often sit behind different gateways, so each
+  # takes its own auth block. Uncomment and fill in what your setup needs;
+  # bearer, basic and tls can all be left out for an unauthenticated demo.
+  # auth:
+  #   bearer_token_file: /etc/noisefloor/prometheus-token   # re-read per request
+  #   # bearer_token: inline-token-for-quick-testing
+  #   # username: alice
+  #   # password_file: /etc/noisefloor/prometheus-password
+  #   # tls:
+  #   #   ca_file: /etc/noisefloor/ca.pem
+  #   #   cert_file: /etc/noisefloor/client.pem
+  #   #   key_file: /etc/noisefloor/client-key.pem
+  #   #   insecure_skip_verify: false   # only true against a host you control
 
 alertmanager:
   url: http://localhost:9093
+  # auth:
+  #   bearer_token_file: /etc/noisefloor/alertmanager-token
 
 database: noisefloor.db
 window: 30d
@@ -182,7 +198,12 @@ func runScan(args []string) error {
 		fmt.Fprintln(os.Stderr,
 			"warning: no alertmanager.url configured; silenced_rate reads 0 for every rule")
 	default:
-		fetched, ferr := collect.FetchSilences(ctx, cfg.Alertmanager.URL, nil)
+		amRT, rtErr := cfg.Alertmanager.Auth.Transport()
+		if rtErr != nil {
+			return fmt.Errorf("alertmanager client: %w", rtErr)
+		}
+		amClient := &http.Client{Transport: amRT, Timeout: 30 * time.Second}
+		fetched, ferr := collect.FetchSilences(ctx, cfg.Alertmanager.URL, amClient)
 		if ferr != nil {
 			silencesAvailable = false
 			fmt.Fprintf(os.Stderr,

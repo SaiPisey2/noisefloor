@@ -41,7 +41,11 @@ type API struct{ v1 v1.API }
 var _ Client = (*API)(nil)
 
 func New(cfg config.Prometheus) (*API, error) {
-	c, err := promapi.NewClient(promapi.Config{Address: cfg.URL})
+	rt, err := cfg.Auth.Transport()
+	if err != nil {
+		return nil, fmt.Errorf("prometheus client: %w", err)
+	}
+	c, err := promapi.NewClient(promapi.Config{Address: cfg.URL, RoundTripper: rt})
 	if err != nil {
 		return nil, fmt.Errorf("prometheus client: %w", err)
 	}
