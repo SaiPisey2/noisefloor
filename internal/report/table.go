@@ -22,8 +22,14 @@ type Row struct {
 }
 
 type Meta struct {
-	WindowStart   time.Time
-	WindowEnd     time.Time
+	WindowStart time.Time
+	WindowEnd   time.Time
+
+	// EarliestData is where history actually begins: the start of the earliest
+	// episode found. Truncated says that is materially later than WindowStart,
+	// in which case the window line reports the span of data that exists rather
+	// than the span that was asked for.
+	EarliestData  time.Time
 	Truncated     bool
 	RulesActive   int
 	RulesInactive int
@@ -46,13 +52,15 @@ type Meta struct {
 func Render(w io.Writer, rows []Row, meta Meta) error {
 	days := meta.WindowEnd.Sub(meta.WindowStart).Hours() / 24
 
-	// A truncated window gets minute precision on the start. Printing a whole
-	// number of days beside a date-only range reads as a contradiction when
-	// retention actually clipped an hour off the front.
-	if meta.Truncated {
-		fmt.Fprintf(w, "Window     %s to %s  (%.1fd, limited by retention)\n",
-			meta.WindowStart.Format("2006-01-02 15:04"),
-			meta.WindowEnd.Format("2006-01-02 15:04"), days)
+	// When data begins partway in, say where it begins and how much was asked
+	// for -- not "limited by retention", which the scan cannot actually know.
+	// A rule set that is simply younger than the window looks identical from
+	// here, and claiming retention clipped it would be a guess stated as fact.
+	if meta.Truncated && !meta.EarliestData.IsZero() {
+		fmt.Fprintf(w, "Window     %s to %s  (%.0fd requested, data begins %s)\n",
+			meta.WindowStart.Format("2006-01-02"),
+			meta.WindowEnd.Format("2006-01-02"), days,
+			meta.EarliestData.Format("2006-01-02"))
 	} else {
 		fmt.Fprintf(w, "Window     %s to %s  (%.0fd)\n",
 			meta.WindowStart.Format("2006-01-02"),

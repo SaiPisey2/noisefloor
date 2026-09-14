@@ -221,7 +221,15 @@ func runScan(args []string) error {
 		byRule[e.RuleID] = append(byRule[e.RuleID], e)
 	}
 
+	// Confidence is earned against time actually observed, not time requested.
+	// A fresh Prometheus holding three days of history must not score a rule as
+	// though it had been watched for thirty; equally, a full window must not be
+	// shortened by a probe's guess. EarliestData is measured from the episodes
+	// themselves, so this is exact either way.
 	window := backfill.WindowEnd.Sub(backfill.WindowStart)
+	if backfill.Truncated && !backfill.EarliestData.IsZero() {
+		window = backfill.WindowEnd.Sub(backfill.EarliestData)
+	}
 	var rows []report.Row
 
 	for _, r := range rules {
@@ -276,6 +284,7 @@ func runScan(args []string) error {
 	return report.Render(os.Stdout, rows, report.Meta{
 		WindowStart:       backfill.WindowStart,
 		WindowEnd:         backfill.WindowEnd,
+		EarliestData:      backfill.EarliestData,
 		Truncated:         backfill.Truncated,
 		RulesActive:       ruleSync.Active,
 		RulesInactive:     inactive,

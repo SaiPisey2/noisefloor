@@ -2,10 +2,8 @@ package prom
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -88,63 +86,6 @@ func TestRulesParsesAlertingRules(t *testing.T) {
 	}
 	if groups[0].File != "/etc/prometheus/rules/demo.yml" {
 		t.Errorf("file = %q", groups[0].File)
-	}
-}
-
-func TestRetentionFloorUsesEarliestSampleInRange(t *testing.T) {
-	// Data begins partway into the requested window: the floor is where the
-	// data starts, not where the request started.
-	body := `{"status":"success","data":{"resultType":"matrix","result":[
-	  {"metric":{},"values":[[1699000000,"2"],[1699003600,"2"],[1699007200,"2"]]}]}}`
-
-	var gotPath string
-	api := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(body))
-	})
-
-	from := time.Unix(1_698_000_000, 0).UTC()
-	to := time.Unix(1_700_000_000, 0).UTC()
-
-	floor, err := api.RetentionFloor(context.Background(), from, to)
-	if err != nil {
-		t.Fatalf("RetentionFloor: %v", err)
-	}
-	want := time.Unix(1_699_000_000, 0).UTC()
-	if !floor.Equal(want) {
-		t.Errorf("floor = %v, want %v", floor, want)
-	}
-	// The bug this replaces used an instant query, which always reports
-	// roughly now regardless of how much history exists.
-	if !strings.HasSuffix(gotPath, "query_range") {
-		t.Errorf("RetentionFloor hit %q; it must use query_range, never an "+
-			"instant query, or it reports now and collapses every window", gotPath)
-	}
-}
-
-func TestRetentionFloorReportsNoData(t *testing.T) {
-	body := `{"status":"success","data":{"resultType":"matrix","result":[]}}`
-	api := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(body))
-	})
-
-	from := time.Unix(1_698_000_000, 0).UTC()
-	to := time.Unix(1_700_000_000, 0).UTC()
-
-	if _, err := api.RetentionFloor(context.Background(), from, to); !errors.Is(err, ErrEmptyResult) {
-		t.Errorf("err = %v, want ErrEmptyResult when no ALERTS data exists", err)
-	}
-}
-
-func TestRetentionFloorRejectsEmptyWindow(t *testing.T) {
-	api := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("RetentionFloor queried Prometheus for an empty window")
-	})
-	now := time.Unix(1_700_000_000, 0).UTC()
-	if _, err := api.RetentionFloor(context.Background(), now, now); err == nil {
-		t.Error("RetentionFloor accepted an empty window, want error")
 	}
 }
 

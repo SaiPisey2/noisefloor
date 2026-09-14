@@ -8,14 +8,11 @@ import (
 
 	"github.com/prometheus/common/model"
 
-	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 	"github.com/SaiPisey2/noisefloor/internal/config"
 	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
 type fakeProm struct {
-	floor    time.Time
-	noData   bool
 	calls    [][2]time.Time
 	matrixFn func(start, end time.Time) model.Matrix
 
@@ -35,13 +32,6 @@ func (f *fakeProm) QueryRange(_ context.Context, _ string, start, end time.Time,
 		return model.Matrix{}, nil
 	}
 	return f.matrixFn(start, end), nil
-}
-
-func (f *fakeProm) RetentionFloor(_ context.Context, from, to time.Time) (time.Time, error) {
-	if f.noData {
-		return time.Time{}, prom.ErrEmptyResult
-	}
-	return f.floor, nil
 }
 
 type fakeStore struct {
@@ -112,94 +102,9 @@ func testConfig() config.Config {
 	return cfg
 }
 
-func TestRunClampsToRetentionFloor(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
-	floor := now.Add(-48 * time.Hour)
-
-	p := &fakeProm{floor: floor}
-	b := New(p, newFakeStore(), testConfig())
-
-	res, err := b.Run(context.Background(), now.Add(-30*24*time.Hour), now)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !res.WindowStart.Equal(floor) {
-		t.Errorf("window start = %v, want retention floor %v", res.WindowStart, floor)
-	}
-	if !res.Truncated {
-		t.Error("Truncated must be true when retention shortens the window")
-	}
-}
-
-// TestRunTreatsSubProbeStepFloorAsNotTruncated guards against the probe's own
-// granularity being mistaken for evidence of truncation. Over a 30-day window
-// the probe step is exactly 1h; a floor only minutes past `from` is
-// measurement noise, not retention actually clipping anything -- and the
-// same scan must not flip between "limited by retention" and not depending
-// on where the probe's hourly samples happened to land.
-func TestRunTreatsSubProbeStepFloorAsNotTruncated(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
-	from := now.Add(-30 * 24 * time.Hour)
-	floor := from.Add(10 * time.Minute)
-
-	p := &fakeProm{floor: floor}
-	b := New(p, newFakeStore(), testConfig())
-
-	res, err := b.Run(context.Background(), from, now)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !res.WindowStart.Equal(floor) {
-		t.Errorf("window start = %v, want retention floor %v (the window shown must stay truthful)", res.WindowStart, floor)
-	}
-	if res.Truncated {
-		t.Error("Truncated must be false when the floor is within one probe step of `from`")
-	}
-}
-
-// TestRunTreatsBeyondProbeStepFloorAsTruncated is the other side of the same
-// guard: a floor genuinely hours past `from` is real evidence of truncation,
-// not probe noise, and must still be reported.
-func TestRunTreatsBeyondProbeStepFloorAsTruncated(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
-	from := now.Add(-30 * 24 * time.Hour)
-	floor := from.Add(3 * time.Hour)
-
-	p := &fakeProm{floor: floor}
-	b := New(p, newFakeStore(), testConfig())
-
-	res, err := b.Run(context.Background(), from, now)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !res.WindowStart.Equal(floor) {
-		t.Errorf("window start = %v, want retention floor %v", res.WindowStart, floor)
-	}
-	if !res.Truncated {
-		t.Error("Truncated must be true when the floor is well beyond one probe step past `from`")
-	}
-}
-
-func TestRunTreatsNoHistoryAsAnEmptyWindowNotAnError(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0).UTC()
-	p := &fakeProm{noData: true}
-	b := New(p, newFakeStore(), testConfig())
-
-	res, err := b.Run(context.Background(), now.Add(-24*time.Hour), now)
-	if err != nil {
-		t.Fatalf("Run returned an error for a Prometheus with no ALERTS history: %v", err)
-	}
-	if res.Truncated {
-		t.Error("Truncated should be false when there is simply no data yet")
-	}
-	if res.Episodes != 0 {
-		t.Errorf("episodes = %d, want 0", res.Episodes)
-	}
-}
-
 func TestRunChunksTheQuery(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	p := &fakeProm{floor: now.Add(-30 * 24 * time.Hour)}
+	p := &fakeProm{}
 	b := New(p, newFakeStore(), testConfig())
 
 	// 24h window with a 6h chunk means four queries.
@@ -223,7 +128,6 @@ func TestRunStitchesEpisodesAcrossChunkBoundaries(t *testing.T) {
 	// One alert firing continuously across the whole window, so every chunk
 	// sees part of it. It must come out as a single episode.
 	p := &fakeProm{
-		floor: start.Add(-24 * time.Hour),
 		matrixFn: func(cs, ce time.Time) model.Matrix {
 			var vals []model.SamplePair
 			for t := cs; t.Before(ce); t = t.Add(time.Minute) {
@@ -260,7 +164,6 @@ func TestRunStitchesEpisodesAcrossChunkBoundaries(t *testing.T) {
 func TestRunRecordsStateOnEpisodes(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
 	p := &fakeProm{
-		floor: now.Add(-24 * time.Hour),
 		matrixFn: func(cs, ce time.Time) model.Matrix {
 			return model.Matrix{{
 				Metric: model.Metric{
@@ -290,7 +193,6 @@ func TestRunRecordsStateOnEpisodes(t *testing.T) {
 func TestRunAttachesEpisodesToExistingRule(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
 	p := &fakeProm{
-		floor: now.Add(-24 * time.Hour),
 		matrixFn: func(cs, ce time.Time) model.Matrix {
 			return model.Matrix{{
 				Metric: model.Metric{
@@ -325,7 +227,6 @@ func TestRunAttachesEpisodesToExistingRule(t *testing.T) {
 func TestRunRecordsUnknownAlertAsInactiveOrphan(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
 	p := &fakeProm{
-		floor: now.Add(-24 * time.Hour),
 		matrixFn: func(cs, ce time.Time) model.Matrix {
 			return model.Matrix{{
 				Metric: model.Metric{
@@ -373,7 +274,6 @@ func TestStitchThresholdMatchesBuildIntervalsGapRule(t *testing.T) {
 	firstSample := t0.Add(12 * time.Minute)
 
 	p := &fakeProm{
-		floor: t0.Add(-24 * time.Hour),
 		matrixFn: func(cs, ce time.Time) model.Matrix {
 			var vals []model.SamplePair
 			for _, st := range []time.Time{lastSample, firstSample} {
@@ -424,7 +324,6 @@ func TestRunReturnsPartialResultOnMidChunkQueryError(t *testing.T) {
 
 	// 24h window / 6h chunk = 4 chunks; fail on the second.
 	p := &fakeProm{
-		floor:    now.Add(-30 * 24 * time.Hour),
 		failAt:   2,
 		queryErr: wantErr,
 	}
@@ -479,7 +378,6 @@ func TestRunHandlesQueryRangeEndpointOverlap(t *testing.T) {
 	step := time.Minute
 
 	p := &fakeProm{
-		floor:    start.Add(-24 * time.Hour),
 		matrixFn: inclusiveMatrixFn("Continuous", step),
 	}
 	fs := newFakeStore().withRule("Continuous")
@@ -542,7 +440,7 @@ func TestRunRejectsNonPositiveChunk(t *testing.T) {
 		cfg := testConfig()
 		cfg.Prometheus.Chunk = config.Duration(bad)
 
-		p := &fakeProm{floor: now.Add(-30 * 24 * time.Hour)}
+		p := &fakeProm{}
 		res, err := New(p, newFakeStore(), cfg).Run(context.Background(), from, to)
 		if err == nil {
 			t.Errorf("chunk %v accepted; the chunk loop would never advance", bad)
@@ -555,5 +453,123 @@ func TestRunRejectsNonPositiveChunk(t *testing.T) {
 				"Run documents its result as partial but never zero",
 				bad, res.WindowStart, res.WindowEnd, from, to)
 		}
+	}
+}
+
+// sparseMatrixFn returns a single sample at `at`, and nothing anywhere else.
+// This is what the deleted retention probe got wrong: sampled hourly with
+// instant-query lookback, a lone episode this far into the window made the
+// probe report a floor far past the true start of history.
+func sparseMatrixFn(alertName string, at time.Time) func(cs, ce time.Time) model.Matrix {
+	return func(cs, ce time.Time) model.Matrix {
+		if at.Before(cs) || !at.Before(ce) {
+			return model.Matrix{}
+		}
+		return model.Matrix{{
+			Metric: model.Metric{
+				"__name__": "ALERTS", "alertname": model.LabelValue(alertName),
+				"alertstate": "firing", "instance": "x",
+			},
+			Values: []model.SamplePair{{
+				Timestamp: model.TimeFromUnix(at.Unix()), Value: 1,
+			}},
+		}}
+	}
+}
+
+// TestRunAlwaysQueriesTheFullRequestedWindow is the core of the retention fix.
+// Run must never shorten [from, to): Prometheus returns nothing outside
+// retention anyway, so the whole window costs a few empty queries, while
+// clipping it silently discarded real episodes.
+func TestRunAlwaysQueriesTheFullRequestedWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	from := now.Add(-24 * time.Hour)
+
+	// Data exists only in the very first chunk. A probe would have missed it
+	// and clamped the window past it.
+	early := from.Add(30 * time.Minute)
+	p := &fakeProm{matrixFn: sparseMatrixFn("Sparse", early)}
+	fs := newFakeStore().withRule("Sparse")
+
+	res, err := New(p, fs, testConfig()).Run(context.Background(), from, now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.WindowStart.Equal(from) || !res.WindowEnd.Equal(now) {
+		t.Errorf("window = %v..%v, want the full requested %v..%v",
+			res.WindowStart, res.WindowEnd, from, now)
+	}
+	if p.calls[0][0].After(from) {
+		t.Errorf("first chunk started at %v, want %v; the window must never be clipped",
+			p.calls[0][0], from)
+	}
+	if len(fs.episodes) != 1 {
+		t.Fatalf("got %d episodes, want 1; the episode in the first chunk must "+
+			"not be discarded", len(fs.episodes))
+	}
+}
+
+// TestRunReportsEarliestEpisodeAsEarliestData pins the replacement for the
+// probe: where history begins is measured from the episodes themselves, which
+// is exact rather than probabilistic.
+func TestRunReportsEarliestEpisodeAsEarliestData(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	from := now.Add(-30 * 24 * time.Hour)
+	first := now.Add(-3 * 24 * time.Hour)
+
+	p := &fakeProm{matrixFn: sparseMatrixFn("Late", first)}
+	fs := newFakeStore().withRule("Late")
+
+	res, err := New(p, fs, testConfig()).Run(context.Background(), from, now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.EarliestData.Equal(first) {
+		t.Errorf("EarliestData = %v, want the first episode's start %v", res.EarliestData, first)
+	}
+	if !res.Truncated {
+		t.Error("Truncated must be true when data begins 27 days into the window")
+	}
+}
+
+// TestRunTreatsDataWithinOneChunkAsNotTruncated is the other side: a rule that
+// simply did not fire in the first chunk is not evidence of a retention edge,
+// and must not shorten the window the confidence term is measured against.
+func TestRunTreatsDataWithinOneChunkAsNotTruncated(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC().Truncate(time.Hour)
+	from := now.Add(-30 * 24 * time.Hour)
+	first := from.Add(2 * time.Hour) // inside the 6h chunk
+
+	p := &fakeProm{matrixFn: sparseMatrixFn("Early", first)}
+	fs := newFakeStore().withRule("Early")
+
+	res, err := New(p, fs, testConfig()).Run(context.Background(), from, now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Truncated {
+		t.Errorf("Truncated = true for data beginning %v after `from`; one chunk "+
+			"of slack must absorb a rule that just did not fire yet",
+			first.Sub(from))
+	}
+}
+
+func TestRunTreatsNoHistoryAsAnEmptyWindowNotAnError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p := &fakeProm{} // a fresh Prometheus with no ALERTS data at all
+	b := New(p, newFakeStore(), testConfig())
+
+	res, err := b.Run(context.Background(), now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("Run returned an error for a Prometheus with no ALERTS history: %v", err)
+	}
+	if res.Truncated {
+		t.Error("Truncated should be false when there is simply no data yet")
+	}
+	if !res.EarliestData.IsZero() {
+		t.Errorf("EarliestData = %v, want zero when no episodes exist", res.EarliestData)
+	}
+	if res.Episodes != 0 {
+		t.Errorf("episodes = %d, want 0", res.Episodes)
 	}
 }

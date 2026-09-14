@@ -4,7 +4,6 @@ package collect
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 // deliberately narrower than prom.Client so tests can fake it cheaply.
 type Querier interface {
 	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (model.Matrix, error)
-	RetentionFloor(ctx context.Context, from, to time.Time) (time.Time, error)
 }
 
 // Store is the slice of the store the backfiller writes to.
@@ -37,13 +35,30 @@ var (
 )
 
 type BackfillResult struct {
+	// WindowStart and WindowEnd are always the window that was REQUESTED. The
+	// backfiller never shortens it: Prometheus returns nothing outside
+	// retention anyway, so querying the whole of it costs nothing and cannot
+	// discard data.
 	WindowStart time.Time
 	WindowEnd   time.Time
+
+	// EarliestData is the start of the earliest episode actually reconstructed,
+	// or zero if there were none. It is an exact measurement of where history
+	// begins, unlike probing `count(ALERTS)`: a probe evaluates each point with
+	// instant-query lookback, so for sparse alerting it reports a floor far
+	// later than the first real sample.
+	EarliestData time.Time
+
 	// Episodes counts the episodes reconstructed in the window, NOT rows
 	// written. InsertEpisodes upserts, so re-running over an overlapping
 	// window reports the same count having written nothing new.
-	Episodes  int
-	Chunks    int
+	Episodes int
+	Chunks   int
+
+	// Truncated says the window holds less history than was asked for: data
+	// begins more than one chunk after WindowStart. One chunk of slack, because
+	// a sparse rule may simply not have fired in the first chunk -- that is not
+	// evidence of a retention edge.
 	Truncated bool
 }
 
@@ -64,8 +79,19 @@ type seriesKey struct {
 	fingerprint string
 }
 
-// Run backfills episodes for [from, to), clamped to what Prometheus can
-// still answer for.
+// Run backfills episodes for the whole of [from, to).
+//
+// It deliberately does NOT clamp the window to a probed retention floor.
+// Prometheus answers with nothing outside retention, so the extra chunks cost
+// a few empty queries; clamping, by contrast, cost real data. The probe used
+// `count(ALERTS)` sampled hourly, and Prometheus evaluates each point with
+// instant-query lookback, so a rule that fires rarely produced a floor far
+// later than its first episode. Every episode before that floor was then never
+// queried, and the shortened window dragged the confidence term down until
+// every rule came back `keep`.
+//
+// Where history actually begins is reported instead as EarliestData, measured
+// from the episodes themselves.
 //
 // PRECONDITION: the rules collector must have run first. Run attaches episodes
 // to rules by alert name; if it runs first, a currently-defined alert gets an
@@ -88,27 +114,6 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 	}
 
 	res := BackfillResult{WindowStart: from, WindowEnd: to}
-
-	floor, err := b.prom.RetentionFloor(ctx, from, to)
-	switch {
-	case errors.Is(err, prom.ErrEmptyResult):
-		// No ALERTS data anywhere in the requested window. That is a valid
-		// answer for a fresh Prometheus, not a failure: report the window as
-		// asked and let the scan come back with zero episodes.
-	case err != nil:
-		return res, fmt.Errorf("determine retention floor: %w", err)
-	case floor.After(from):
-		res.WindowStart = floor
-
-		// The floor is a probe result, granular to one probe step, so a floor
-		// a few minutes past `from` is measurement noise rather than evidence
-		// that retention clipped anything. Without this guard the same scan
-		// reports "limited by retention" on one run and not the next, purely
-		// from where the probe's samples happened to land -- which makes the
-		// tool look unreliable about the one thing it exists to be trusted on.
-		probeStep := to.Sub(from) / prom.ProbePoints
-		res.Truncated = floor.Sub(from) > probeStep
-	}
 
 	step := b.cfg.Prometheus.Step.Std()
 	chunk := b.cfg.Prometheus.Chunk.Std()
@@ -170,6 +175,9 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 			}
 		}
 		for _, iv := range se.Intervals {
+			if res.EarliestData.IsZero() || iv.Start.Before(res.EarliestData) {
+				res.EarliestData = iv.Start
+			}
 			toInsert = append(toInsert, store.Episode{
 				RuleID:      ruleID,
 				Fingerprint: se.Fingerprint,
@@ -184,6 +192,11 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 			})
 		}
 	}
+
+	// Exact, not probabilistic: the first episode is the first thing Prometheus
+	// could still tell us about. One chunk of slack, because a rule that simply
+	// did not fire in the first chunk is not a retention edge.
+	res.Truncated = !res.EarliestData.IsZero() && res.EarliestData.Sub(from) > chunk
 
 	if err := b.db.InsertEpisodes(ctx, toInsert); err != nil {
 		return res, fmt.Errorf("persist episodes: %w", err)

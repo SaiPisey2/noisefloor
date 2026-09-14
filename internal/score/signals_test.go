@@ -40,10 +40,10 @@ func TestComputeEmptyInput(t *testing.T) {
 func TestShortLivedRateUsesFloorOfFiveMinutes(t *testing.T) {
 	// for: 0 means the threshold is the 5m floor.
 	eps := []store.Episode{
-		ep(1, "a", 0, time.Minute),               // short
-		ep(1, "a", time.Hour, 2*time.Minute),      // short
-		ep(1, "a", 2*time.Hour, 30*time.Minute),   // long
-		ep(1, "a", 3*time.Hour, 20*time.Minute),   // long
+		ep(1, "a", 0, time.Minute),              // short
+		ep(1, "a", time.Hour, 2*time.Minute),    // short
+		ep(1, "a", 2*time.Hour, 30*time.Minute), // long
+		ep(1, "a", 3*time.Hour, 20*time.Minute), // long
 	}
 	s := Compute(Input{Rule: rule(0), Episodes: eps, Location: time.UTC})
 	closeTo(t, "short_lived_rate", s.ShortLivedRate, 0.5)

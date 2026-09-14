@@ -33,19 +33,6 @@ func TestRenderSortsByNoiseDescending(t *testing.T) {
 	}
 }
 
-func TestRenderShowsTruncationWarning(t *testing.T) {
-	meta := testMeta()
-	meta.Truncated = true
-
-	var sb strings.Builder
-	if err := Render(&sb, nil, meta); err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	if !strings.Contains(sb.String(), "limited by retention") {
-		t.Error("a truncated window must say so; silently reporting a shorter window is a lie")
-	}
-}
-
 func TestRenderHandlesNoRules(t *testing.T) {
 	var sb strings.Builder
 	if err := Render(&sb, nil, testMeta()); err != nil {
@@ -153,21 +140,41 @@ func TestPctClampsAndHandlesNaN(t *testing.T) {
 	}
 }
 
-func TestRenderTruncatedWindowUsesMinutePrecisionAndFractionalDays(t *testing.T) {
+// TestRenderTruncatedWindowReportsWhereDataBegins pins the corrected wording.
+// The scan cannot tell a retention edge from a rule set younger than the
+// window, so it states the measured fact -- where data begins -- instead of
+// claiming retention clipped anything.
+func TestRenderTruncatedWindowReportsWhereDataBegins(t *testing.T) {
 	meta := testMeta()
 	meta.Truncated = true
-	meta.WindowStart = time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	meta.EarliestData = time.Date(2026, 9, 8, 4, 30, 0, 0, time.UTC)
 
 	var sb strings.Builder
 	if err := Render(&sb, nil, meta); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	out := sb.String()
-	if !strings.Contains(out, "2026-08-15 12:00") {
-		t.Errorf("truncated window must show minute precision on the start, got:\n%s", out)
+	want := "Window     2026-08-15 to 2026-09-14  (30d requested, data begins 2026-09-08)"
+	if !strings.Contains(out, want) {
+		t.Errorf("window line = \n%s\nwant it to contain:\n%s", out, want)
 	}
-	if !strings.Contains(out, "29.5d") {
-		t.Errorf("truncated window must show a fractional day count, got:\n%s", out)
+	if strings.Contains(out, "limited by retention") {
+		t.Error("the report must not claim retention limited the window; it cannot know that")
+	}
+}
+
+// A truncated flag with no EarliestData cannot say where data begins, so it
+// must fall back to the plain line rather than print a zero date.
+func TestRenderTruncatedWithoutEarliestDataFallsBack(t *testing.T) {
+	meta := testMeta()
+	meta.Truncated = true
+
+	var sb strings.Builder
+	if err := Render(&sb, nil, meta); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(sb.String(), "(30d)") {
+		t.Errorf("want the plain window line, got:\n%s", sb.String())
 	}
 }
 

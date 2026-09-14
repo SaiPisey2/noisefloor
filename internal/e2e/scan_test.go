@@ -103,7 +103,13 @@ func TestScanReachesExpectedVerdicts(t *testing.T) {
 		byRule[e.RuleID] = append(byRule[e.RuleID], e)
 	}
 
+	// Same rule as cmd/noisefloor: confidence is earned against time actually
+	// observed, so a window whose data begins late is measured from where the
+	// data begins, not from where the request did.
 	window := res.WindowEnd.Sub(res.WindowStart)
+	if res.Truncated && !res.EarliestData.IsZero() {
+		window = res.WindowEnd.Sub(res.EarliestData)
+	}
 	verdicts := map[string]string{}
 	signals := map[string]score.Signals{}
 
