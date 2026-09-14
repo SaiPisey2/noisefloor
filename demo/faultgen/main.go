@@ -19,42 +19,50 @@ func elapsed() float64 { return time.Since(start).Seconds() }
 func metrics(w http.ResponseWriter, _ *http.Request) {
 	t := elapsed()
 
-	// Every waveform below has an on-period of at least two sample steps and
-	// an off-period longer than the collector's two-step gap tolerance.
-	// Shorter pulses alias away at a 1m step, or merge into one long episode,
-	// and the demo then fails to demonstrate the thing it exists to show.
+	// Three constraints bind every period below, and all three are
+	// load-bearing:
+	//
+	//  1. on-period >= 3 sample steps, so the episode survives sampling.
+	//  2. off-period > the query lookback (1m, set on the demo Prometheus),
+	//     or the gap is invisible and the episodes merge into one.
+	//  3. where a rule must read flap_rate 0, off-period > the 1h flap window.
+	//
+	// The periods are also deliberately NOT harmonically related. An earlier
+	// set had DemoSpiky at 5400s and the cause rules at 600s -- 5400 being an
+	// exact multiple of 600, every single Spiky fire coincided with a cause
+	// fire and Spiky read cofire_ratio 100%, which is an artefact of the
+	// fixture rather than anything about the rule.
+	//
 	// These periods must stay in step with demo/seed/main.go.
 
-	// Spiky: 3m firing every 90m. Short-lived, and far enough apart that it
-	// does not read as flapping. 3m not 2m because a 120s window yields
-	// exactly two samples with zero margin at a 1m step, and the 15s
-	// evaluation grid can shave up to 15s off each edge.
+	// Spiky: 3m firing every 97m (94m off). Short-lived, and far enough apart
+	// -- past the 1h flap window -- that it does not read as flapping.
 	spiky := 0.0
-	if math.Mod(t, 5400) < 180 {
+	if math.Mod(t, 5820) < 180 {
 		spiky = 1
 	}
 
-	// Flapping: 4m on, 4m off. Short episodes that keep coming back.
+	// Flapping: 4m on, 7m off. Off-period exceeds the 1m query lookback but
+	// stays inside the 1h flap window, so it reads as flapping.
 	flapping := 0.0
-	if math.Mod(t, 480) < 240 {
+	if math.Mod(t, 660) < 240 {
 		flapping = 1
 	}
 
-	// Sustained: one long episode per hour in the live stack, so the demo
+	// Sustained: one long episode every 90m in the live stack, so the demo
 	// shows something without waiting a day.
 	sustained := 0.0
-	if math.Mod(t, 3600) < 1800 {
+	if math.Mod(t, 5400) < 1800 {
 		sustained = 1
 	}
 
 	// Cause A-D: four components that always breach together, which is what
 	// cause-based alerting looks like from the outside. Four, not three,
 	// because co-fire detection requires three OTHER rules firing alongside.
-	// 3m not 2m for the same sampling-margin reason as spiky: a 120s window
-	// yields exactly two samples with zero margin at a 1m step, and the 15s
-	// evaluation grid can shave up to 15s off each edge.
+	// 3m on, 68m off -- past the 1h flap window, so cofire drives the verdict
+	// alone instead of flap_rate routing it to tune.
 	cause := 0.0
-	if math.Mod(t, 600) < 180 {
+	if math.Mod(t, 4260) < 180 {
 		cause = 1
 	}
 

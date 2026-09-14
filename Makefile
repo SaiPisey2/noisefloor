@@ -32,6 +32,7 @@ integration:
 # Generate synthetic ALERTS history and convert it to TSDB blocks that the
 # demo Prometheus loads on start.
 demo-seed:
+	rm -rf demo/seed/blocks demo/seed/alerts.openmetrics
 	go run ./demo/seed -out demo/seed/alerts.openmetrics -days 30
 	docker run --rm -v $(PWD)/demo/seed:/seed --entrypoint promtool prom/prometheus:v3.6.0 \
 		tsdb create-blocks-from openmetrics /seed/alerts.openmetrics /seed/blocks

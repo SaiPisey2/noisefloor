@@ -25,48 +25,65 @@ type scenario struct {
 }
 
 func scenarios() []scenario {
-	// Every on-period below is at least three sample steps long, and every
+	// Three constraints bind every period here, and all three are load-bearing:
+	//
+	//  1. on-period >= 3 sample steps, so the episode survives sampling.
+	//  2. off-period > the query lookback (1m, set on the demo Prometheus),
+	//     or the gap is invisible and the episodes merge into one.
+	//  3. where a rule must read flap_rate 0, off-period > the 1h flap window.
+	//
+	// The periods are also deliberately NOT harmonically related. An earlier
+	// set had DemoSpiky at 5400s and the cause rules at 600s -- 5400 being an
+	// exact multiple of 600, every single Spiky fire coincided with a cause
+	// fire and Spiky read cofire_ratio 100%, which is an artefact of the
+	// fixture rather than anything about the rule.
+	//
+	// Every on-period below is at least two sample steps long, and every
 	// off-period is longer than the collector's two-step gap tolerance.
-	// This is not cosmetic: a two-step on-period has zero margin, because
-	// Prometheus' evaluation grid runs on a phase independent of the query
-	// grid and can shave a step off either edge, aliasing an episode away
-	// entirely. Three steps is the floor. Keep these in step with
-	// demo/faultgen.
+	// This is not cosmetic: a 20s pulse sampled every 60s aliases away
+	// entirely, and a 45s-on/45s-off wave sampled at 60s produces gaps of at
+	// most two steps, which the collector merges into one continuous episode
+	// with a flap rate of zero. Keep these in step with demo/faultgen.
 	return []scenario{
 		{
-			// 3m firing every 90m: short-lived, and far enough apart that it
-			// does not register as flapping. Reaches `retire` only once a
-			// silence exists against it, which is the correct bar.
+			// 3m firing every 97m (94m off): short-lived, and far enough
+			// apart -- past the 1h flap window -- that it does not register
+			// as flapping. Reaches `retire` only once a silence exists
+			// against it, which is the correct bar.
 			alertname: "DemoSpiky", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 5400) < 180 },
+			firing: func(t float64) bool { return mod(t, 5820) < 180 },
 		},
 		{
-			// 4m on, 4m off: short episodes that keep coming back.
+			// 4m on, 7m off: short episodes that keep coming back. Off-period
+			// exceeds the 1m query lookback but stays inside the 1h flap
+			// window, so it reads as flapping.
 			alertname: "DemoFlapping", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 480) < 240 },
+			firing: func(t float64) bool { return mod(t, 660) < 240 },
 		},
 		{
 			// One long episode a day: a real alert.
 			alertname: "DemoSustained", severity: "page",
-			firing: func(t float64) bool { return mod(t, 86400) < 3600 },
+			firing: func(t float64) bool { return mod(t, 90000) < 3600 },
 		},
 		// Four rules, not three: co-fire detection requires three OTHER
 		// rules firing alongside, so three would leave each one short.
+		// 3m on, 68m off -- past the 1h flap window, so cofire drives the
+		// verdict alone instead of flap_rate routing it to tune.
 		{
 			alertname: "DemoCauseA", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 600) < 180 },
+			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseB", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 600) < 180 },
+			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseC", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 600) < 180 },
+			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 		{
 			alertname: "DemoCauseD", severity: "warning",
-			firing: func(t float64) bool { return mod(t, 600) < 180 },
+			firing: func(t float64) bool { return mod(t, 4260) < 180 },
 		},
 	}
 }

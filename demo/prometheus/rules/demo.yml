@@ -5,14 +5,14 @@ groups:
   - name: demo
     interval: 15s
     rules:
-      # Fires for 2m every 90m and resolves itself. Nobody acts on it.
-      # Expected verdict: retire, once a silence exists against it.
+      # Fires for 3m every 97m (94m off) and resolves itself. Nobody acts
+      # on it. Expected verdict: retire.
       - alert: DemoSpiky
         expr: demo_spiky_gauge > 0
         labels: {severity: warning}
         annotations: {summary: "Spiky signal breached"}
 
-      # 4m on, 4m off: short episodes that keep coming back.
+      # 4m on, 7m off: short episodes that keep coming back.
       # Expected verdict: tune.
       - alert: DemoFlapping
         expr: demo_flapping_gauge > 0
@@ -20,7 +20,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "Flapping signal breached"}
 
-      # Fires once and stays firing. Expected verdict: keep.
+      # Fires for 1h every 90m and stays firing. Expected verdict: automate.
       - alert: DemoSustained
         expr: demo_sustained_gauge > 0
         for: 2m
@@ -30,7 +30,8 @@ groups:
       # A through D always fire together: cause-based alerting.
       # Four rules, not three: co-fire detection requires three OTHER rules
       # firing alongside, so three rules would leave each one short.
-      # Expected: high cofire_ratio on all four.
+      # Off-period (68m) exceeds the 1h flap window, so flap_rate reads 0 and
+      # cofire_ratio alone drives the verdict. Expected: retire on all four.
       - alert: DemoCauseA
         expr: demo_cause_gauge{component="a"} > 0
         labels: {severity: warning}

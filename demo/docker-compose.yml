@@ -10,6 +10,14 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=90d
       - --web.enable-admin-api
+      # Must match noisefloor's query step. Prometheus' default 5m staleness
+      # lookback synthesises a value for up to 5m after the last real sample,
+      # which masks every gap shorter than that and inflates every episode's
+      # tail. Live rule-evaluated series carry staleness markers so this never
+      # bites them, but blocks built by promtool from OpenMetrics carry none --
+      # so without this the seeded history shows continuous firing where the
+      # waveform says on/off, and the demo proves nothing.
+      - --query.lookback-delta=1m
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
