@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -98,6 +99,17 @@ func New(cfg config.Config, db *store.SQLite) (*Server, error) {
 	}, nil
 }
 
+// requestTimeout bounds how long any single request may take end to end,
+// enforced by wrapping the whole route table in http.TimeoutHandler: past
+// this, the handler's goroutine is abandoned (its context is canceled, so
+// an in-flight database query gets to notice and stop) and the client
+// gets a 503 instead of waiting on a request that -- on a read-only
+// reporting server with no route that should ever legitimately take this
+// long -- has nothing left to wait for. Kept comfortably under
+// cmd/noisefloor's http.Server.WriteTimeout so this response has time to
+// actually reach the client before that timeout would also cut it off.
+const requestTimeout = 10 * time.Second
+
 // Handler builds the full route table.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -114,9 +126,44 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /healthz", s.instrument("/healthz", s.handleHealthz))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.reg.registry, promhttp.HandlerOpts{}))
 
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
+	mux.Handle("GET /static/", disableStaticListing(http.StripPrefix("/static/", http.FileServerFS(staticSub))))
 
-	return mux
+	return http.TimeoutHandler(securityHeaders(mux), requestTimeout, "request timed out\n")
+}
+
+// securityHeaders sets the response headers every route on this server
+// sends, regardless of content type. X-Content-Type-Options stops a
+// browser from re-sniffing an HTML or JSON response as something else it
+// might execute. The Content-Security-Policy is as strict as a page with
+// no inline script, no inline style, and no cross-origin resources can
+// afford to be -- see the package doc comment's rule 1 on why nothing here
+// ever needs 'unsafe-inline': there is nothing this policy would break,
+// and it closes the residual class of injection html/template's escaping
+// already guards against, for free.
+func securityHeaders(h http.Handler) http.Handler {
+	const csp = "default-src 'none'; script-src 'self'; style-src 'self'; " +
+		"img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", csp)
+		h.ServeHTTP(w, r)
+	})
+}
+
+// disableStaticListing refuses any request under /static/ whose path ends
+// in "/" -- including /static/ itself -- before it reaches
+// http.FileServerFS, which otherwise renders a directory listing for it.
+// The static tree is two fixed, named assets (style.css, filter.js);
+// nothing here is meant to be browsed, so there is no listing worth
+// serving in the first place.
+func disableStaticListing(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // statusRecorder captures the status code a handler wrote, for the request
@@ -152,4 +199,25 @@ func idParam(r *http.Request) (int64, bool) {
 	v := r.PathValue("id")
 	id, err := strconv.ParseInt(v, 10, 64)
 	return id, err == nil
+}
+
+// episodePaginationParams reads `?limit=` and `?offset=` off r, for the
+// JSON API's episode list. A missing, malformed or non-positive limit
+// falls back to store.DefaultEpisodesPerPage; store.ListEpisodesForRule
+// clamps whatever comes out of here to store.MaxEpisodesPerPage on its own,
+// so a client cannot force one request to allocate an unbounded page by
+// passing a huge limit.
+func episodePaginationParams(r *http.Request) (limit, offset int) {
+	limit = store.DefaultEpisodesPerPage
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }

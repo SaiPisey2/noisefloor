@@ -545,7 +545,36 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	httpSrv := &http.Server{Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Handler: srv.Handler(),
+		// Go's zero-value http.Server has no timeouts at all -- every one
+		// of these is otherwise infinite. Under -allow-remote in
+		// particular, a handful of clients that open a connection and
+		// send nothing (or send slowly, or never read the response) would
+		// each pin a goroutine and a file descriptor forever; a read-only
+		// reporting server with no authentication in front of it is
+		// exactly the kind of thing worth probing that way.
+		//
+		// ReadHeaderTimeout bounds how long a client gets to finish
+		// sending request headers once it has connected -- the classic
+		// slowloris window.
+		ReadHeaderTimeout: 5 * time.Second,
+		// ReadTimeout bounds the whole request (headers and body) from
+		// the first byte read. Every route this server serves is GET with
+		// no body, so this is generous, not tight.
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout bounds how long writing the response may take,
+		// from when reading the request finished. The heaviest response
+		// this server produces is a bounded page of episodes (see
+		// store.MaxEpisodesPerPage) or a bucketed timeline, both O(1)-ish
+		// in practice; this is headroom for a slow client on the far end
+		// of a loopback or reverse-proxy connection, not for the handler
+		// itself.
+		WriteTimeout: 30 * time.Second,
+		// IdleTimeout bounds how long a keep-alive connection may sit
+		// between requests before this server closes it.
+		IdleTimeout: 120 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
 
