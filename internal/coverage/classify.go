@@ -38,19 +38,44 @@ func Classify(r Rule, pe ParsedExpr) (RuleMatch, bool) {
 	}
 	var guesses []guess
 
+	// What a rule's own status/code selector is pinned to is evidence about
+	// every rule that carries one, not only about generic request counters,
+	// so it is read once here and weighed against each metric name below.
+	selSig, selCertain, selReason, hasSel := classifyBySelector(pe)
+
 	for _, metric := range pe.Metrics {
 		sig, certain, reason := classifyMetricName(metric)
 		if sig == "" {
 			continue
 		}
-		if sig == SignalRate {
+		switch {
+		case !hasSel:
+			// Nothing to weigh the name against; the name stands.
+		case sig == SignalRate:
 			// The one shape genuinely ambiguous by name alone: a generic
 			// request/operation counter could be tracking volume or
 			// failures depending entirely on which values its own
-			// selectors pin a status/code-shaped label to.
-			if s, c, why, ok := classifyRequestCounterBySelector(pe); ok {
-				sig, certain, reason = s, c, why
-			}
+			// selectors pin a status/code-shaped label to. The selector is
+			// not merely evidence here, it is the answer.
+			sig, certain, reason = selSig, selCertain, selReason
+		case sig == selSig:
+			// Name and selector agree. Say so -- a confident call is worth
+			// explaining too, not just an uncertain one.
+			reason = fmt.Sprintf("%s; %s", reason, selReason)
+		default:
+			// Name and selector disagree: `http_request_duration_seconds_count
+			// {status=~"5.."}` is a duration metric by name and an error
+			// rule by selector, and it is an ordinary way to write one.
+			// Letting the name win silently claimed latency coverage the
+			// service did not have and denied the error coverage it did.
+			// The selector says what the rule SELECTS FOR, which is the
+			// better guide to what it alerts on, so it decides the bucket
+			// -- but a disagreement is exactly the evidence supporting more
+			// than one reading that Certain exists to flag.
+			reason = fmt.Sprintf(
+				"%s, but %s -- name and selector disagree, so this is classified as %s from the "+
+					"selector rather than as %s from the name", reason, selReason, selSig, sig)
+			sig, certain = selSig, false
 		}
 		guesses = append(guesses, guess{sig, certain, reason})
 	}
@@ -98,7 +123,8 @@ func Classify(r Rule, pe ParsedExpr) (RuleMatch, bool) {
 
 // classifyMetricName guesses a signal purely from a metric's name. Never
 // used alone to call a rule "certain" for the one ambiguous shape
-// (request/operation counters) -- see classifyRequestCounterBySelector.
+// (request/operation counters), and never allowed to overrule a
+// failure-indicating selector on any shape -- see classifyBySelector.
 func classifyMetricName(name string) (sig Signal, certain bool, reason string) {
 	lower := strings.ToLower(name)
 	switch {
@@ -106,7 +132,15 @@ func classifyMetricName(name string) (sig Signal, certain bool, reason string) {
 		return SignalRate, true, "\"up\" is the standard Prometheus target-availability metric"
 	case strings.Contains(lower, "error"):
 		return SignalErrors, true, fmt.Sprintf("metric name %q contains \"error\"", name)
-	case strings.Contains(lower, "latency") || strings.Contains(lower, "duration"):
+	case containsAny(lower,
+		"latency", "duration", "response_time", "request_time",
+		// Two widespread conventions that time requests without using
+		// either word: Micrometer/Spring Boot's http_server_requests_seconds
+		// and go-grpc-prometheus's grpc_server_handling_seconds. Both are
+		// ordinary latency histograms, and not recognising them meant a
+		// Spring Boot or gRPC service read as having no latency alerting
+		// however many it had.
+		"requests_seconds", "handling_seconds"):
 		return SignalLatency, true, fmt.Sprintf("metric name %q names a duration/latency measurement", name)
 	case containsAny(lower,
 		"resident_memory", "memory_bytes", "memory_usage", "cpu_seconds", "cpu_usage",
@@ -114,7 +148,11 @@ func classifyMetricName(name string) (sig Signal, certain bool, reason string) {
 		"queue_length", "queue_size", "open_fds", "goroutines", "connections_in_use", "pool_"):
 		return SignalSaturation, true, fmt.Sprintf("metric name %q names resource utilisation", name)
 	case containsAny(lower,
-		"requests_total", "request_count", "requests_count", "operations_total", "calls_total", "ops_total"):
+		"requests_total", "request_count", "requests_count", "operations_total", "calls_total", "ops_total",
+		// go-grpc-prometheus counts completed RPCs as
+		// grpc_server_handled_total, with the status on a grpc_code label:
+		// a request counter in every respect except the word "request".
+		"handled_total"):
 		return SignalRate, true, fmt.Sprintf("metric name %q is a generic request/operation counter", name)
 	}
 	return "", false, ""
@@ -130,34 +168,54 @@ func classifyMetricName(name string) (sig Signal, certain bool, reason string) {
 // that can quietly drift apart.
 var CodeLabelNames = []string{"code", "status", "status_code", "grpc_code", "response_code"}
 
-// classifyRequestCounterBySelector resolves the traffic-vs-errors ambiguity
-// of a generic request counter by looking at what its own status/code-like
-// selector is pinned to: a matcher whose values all look like 4xx/5xx names
-// errors; all 2xx/3xx names traffic; a mix of both, or no such selector at
-// all, is left ambiguous rather than guessed.
-func classifyRequestCounterBySelector(pe ParsedExpr) (sig Signal, certain bool, reason string, ok bool) {
+// classifyBySelector reads what a rule's own status/code-like selector is
+// pinned to: a matcher that selects 4xx/5xx values indicates errors, one
+// that selects 2xx/3xx indicates traffic, a matcher touching both classes,
+// or no such selector at all, is left ambiguous rather than guessed.
+//
+// A negated matcher is read through its negation rather than dropped.
+// `{code!~"2.."}` is one of the two ordinary ways to write an error rule --
+// enumerate the failures, or exclude the successes -- and it says exactly
+// as much about the rule's subject as `{code=~"5.."}` does. Treating it as
+// absent left such a rule reading as a plain traffic counter, confidently.
+// The inversion only runs one way per class: excluding success-like values
+// selects failures, and excluding failure-like values selects the traffic
+// that is left.
+func classifyBySelector(pe ParsedExpr) (sig Signal, certain bool, reason string, ok bool) {
 	for _, label := range CodeLabelNames {
-		values, present := pe.Matchers[label]
+		matchers, present := pe.Matchers[label]
 		if !present {
 			continue
 		}
 		var hasFailure, hasSuccess bool
-		for _, v := range values {
-			f, s := codeClasses(v)
+		written := make([]string, 0, len(matchers))
+		for _, m := range matchers {
+			f, s := codeClasses(m.Value)
+			if m.Negative {
+				// Negating a value that touches both classes says nothing
+				// usable about either.
+				if f && s {
+					continue
+				}
+				f, s = s, f
+				written = append(written, "not "+m.Value)
+			} else {
+				written = append(written, m.Value)
+			}
 			hasFailure = hasFailure || f
 			hasSuccess = hasSuccess || s
 		}
 		switch {
 		case hasFailure && hasSuccess:
 			return SignalErrors, false, fmt.Sprintf(
-				"selector on %q matches both success- and failure-like values (%s); cannot tell whether "+
-					"this rule tracks traffic or errors", label, strings.Join(values, ", ")), true
+				"selector on %q selects both success- and failure-like values (%s); cannot tell whether "+
+					"this rule tracks traffic or errors", label, strings.Join(written, ", ")), true
 		case hasFailure:
 			return SignalErrors, true, fmt.Sprintf(
-				"selector on %q matches failure-like values (%s)", label, strings.Join(values, ", ")), true
+				"selector on %q selects failure-like values (%s)", label, strings.Join(written, ", ")), true
 		case hasSuccess:
 			return SignalRate, true, fmt.Sprintf(
-				"selector on %q matches success-like values (%s)", label, strings.Join(values, ", ")), true
+				"selector on %q selects success-like values (%s)", label, strings.Join(written, ", ")), true
 		}
 	}
 	return "", false, "", false
