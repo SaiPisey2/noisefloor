@@ -306,11 +306,21 @@ func (s *SQLite) scanEpisodes(rows *sql.Rows) ([]Episode, error) {
 const episodeCols = `id, rule_id, fingerprint, labels, started_at, ended_at,
                      resolution_seconds, source, state`
 
+// ListEpisodesInWindow returns every episode OVERLAPPING [from, to),
+// oldest first.
+//
+// Overlap, not "started inside": an episode already running when the window
+// opened is evidence for that window. A rule firing continuously -- a
+// Watchdog, a chronic saturation alert -- is stored once with the start it
+// had on the first scan, and later scans extend its end rather than
+// inserting a new row. Selecting on started_at alone dropped such a rule
+// out of the report the moment the window slid past that recorded start,
+// silently and with no error, on a rule that had never stopped firing.
 func (s *SQLite) ListEpisodesInWindow(ctx context.Context, from, to time.Time) ([]Episode, error) {
 	q := `SELECT ` + episodeCols + ` FROM episodes
-	      WHERE started_at >= ? AND started_at < ?
+	      WHERE started_at < ? AND ended_at >= ?
 	      ORDER BY started_at`
-	rows, err := s.db.QueryContext(ctx, q, unix(from), unix(to))
+	rows, err := s.db.QueryContext(ctx, q, unix(to), unix(from))
 	if err != nil {
 		return nil, fmt.Errorf("list episodes in window: %w", err)
 	}
@@ -482,8 +492,9 @@ func (s *SQLite) ListEpisodesForRule(ctx context.Context, ruleID int64, limit, o
 // fixing, not a more complete silence list" territory.
 const MaxWindowEpisodes = 2000
 
-// ListFiringEpisodesForRuleInWindow returns ruleID's FIRING episodes whose
-// start falls in [from, to), oldest first, capped at MaxWindowEpisodes.
+// ListFiringEpisodesForRuleInWindow returns ruleID's FIRING episodes
+// OVERLAPPING [from, to), oldest first, capped at MaxWindowEpisodes. See
+// ListEpisodesInWindow for why overlap rather than start.
 // This is the window a stored score was actually computed over -- the
 // same set internal/scanner builds RuleEval.Durations from (see
 // ListEpisodesInWindow) -- so a consumer matching silences against this
@@ -494,9 +505,9 @@ const MaxWindowEpisodes = 2000
 // labels, and its cap is much higher because of that.
 func (s *SQLite) ListFiringEpisodesForRuleInWindow(ctx context.Context, ruleID int64, from, to time.Time) ([]Episode, error) {
 	q := `SELECT ` + episodeCols + ` FROM episodes
-	      WHERE rule_id = ? AND state = ? AND started_at >= ? AND started_at < ?
+	      WHERE rule_id = ? AND state = ? AND started_at < ? AND ended_at >= ?
 	      ORDER BY started_at LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(from), unix(to), MaxWindowEpisodes)
+	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(to), unix(from), MaxWindowEpisodes)
 	if err != nil {
 		return nil, fmt.Errorf("list firing episodes for rule %d in window: %w", ruleID, err)
 	}
@@ -511,8 +522,8 @@ func (s *SQLite) ListFiringEpisodesForRuleInWindow(ctx context.Context, ruleID i
 const MaxWindowDurations = 50000
 
 // ListFiringDurationsForRuleInWindow returns just the firing DURATIONS
-// (ended_at - started_at) for ruleID's episodes whose start falls in
-// [from, to), oldest first, capped at MaxWindowDurations. This is the
+// (ended_at - started_at) for ruleID's episodes OVERLAPPING [from, to),
+// oldest first, capped at MaxWindowDurations. This is the
 // cheap path for a consumer -- the rule-detail page's counterfactual --
 // that only needs the numbers remediate.Compute wants, not a full
 // Episode: on a window with tens of thousands of episodes, this allocates
@@ -520,9 +531,9 @@ const MaxWindowDurations = 50000
 // the same rows, because there is no labels map to deserialize per row.
 func (s *SQLite) ListFiringDurationsForRuleInWindow(ctx context.Context, ruleID int64, from, to time.Time) ([]time.Duration, error) {
 	q := `SELECT started_at, ended_at FROM episodes
-	      WHERE rule_id = ? AND state = ? AND started_at >= ? AND started_at < ?
+	      WHERE rule_id = ? AND state = ? AND started_at < ? AND ended_at >= ?
 	      ORDER BY started_at LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(from), unix(to), MaxWindowDurations)
+	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(to), unix(from), MaxWindowDurations)
 	if err != nil {
 		return nil, fmt.Errorf("list firing durations for rule %d in window: %w", ruleID, err)
 	}

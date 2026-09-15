@@ -536,3 +536,102 @@ func TestInsertEpisodesStillExtendsAnOngoingEpisode(t *testing.T) {
 			"of the last scan must be extendable", got[0].EndedAt, longer)
 	}
 }
+
+// TestWindowQueriesKeepAnEpisodeStillRunningAtTheStart is the real-world
+// case the demo fixture could not produce, found scanning the public
+// Prometheus demo three times in a row: a Watchdog-style rule that has been
+// firing continuously for months.
+//
+// Its episode is stored once, clamped to the window of the FIRST scan. Each
+// later scan reconciles the same episode (extending ended_at, keeping
+// started_at) while the window slides forward, so within a couple of scans
+// started_at sits before the window start. The three windowed queries asked
+// for episodes whose START falls inside the window, so the episode dropped
+// out and the rule vanished from the report entirely -- "no rules scored",
+// no error, on a rule that had been firing the whole time.
+//
+// An episode overlapping the window is evidence for that window whether or
+// not it began inside it. All three queries must agree on that, because a
+// stored score is computed over one of them and explained by the others.
+func TestWindowQueriesKeepAnEpisodeStillRunningAtTheStart(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	begin := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "Watchdog", GroupName: "g", FirstSeen: begin, LastSeen: begin, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	if err := db.InsertEpisodes(ctx, []Episode{{
+		RuleID:      id,
+		Fingerprint: "fp1",
+		StartedAt:   begin,
+		EndedAt:     begin.Add(720 * time.Hour),
+		Resolution:  time.Minute,
+		Source:      SourceBackfill,
+		State:       StateFiring,
+	}}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	// The window has since slid an hour past the episode's recorded start.
+	from, to := begin.Add(time.Hour), begin.Add(720*time.Hour)
+
+	eps, err := db.ListEpisodesInWindow(ctx, from, to)
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Errorf("ListEpisodesInWindow returned %d episodes, want 1: the rule was firing throughout this window", len(eps))
+	}
+
+	forRule, err := db.ListFiringEpisodesForRuleInWindow(ctx, id, from, to)
+	if err != nil {
+		t.Fatalf("ListFiringEpisodesForRuleInWindow: %v", err)
+	}
+	if len(forRule) != 1 {
+		t.Errorf("ListFiringEpisodesForRuleInWindow returned %d, want 1", len(forRule))
+	}
+
+	durs, err := db.ListFiringDurationsForRuleInWindow(ctx, id, from, to)
+	if err != nil {
+		t.Fatalf("ListFiringDurationsForRuleInWindow: %v", err)
+	}
+	if len(durs) != 1 {
+		t.Errorf("ListFiringDurationsForRuleInWindow returned %d, want 1", len(durs))
+	}
+}
+
+// TestWindowQueriesExcludeAnEpisodeEndedBeforeTheWindow guards the other
+// edge of that change: overlap must still mean overlap. An episode that
+// closed before the window opened is not evidence for it.
+func TestWindowQueriesExcludeAnEpisodeEndedBeforeTheWindow(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	begin := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "Old", GroupName: "g", FirstSeen: begin, LastSeen: begin, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	if err := db.InsertEpisodes(ctx, []Episode{{
+		RuleID:      id,
+		Fingerprint: "fp1",
+		StartedAt:   begin,
+		EndedAt:     begin.Add(5 * time.Minute),
+		Resolution:  time.Minute,
+		Source:      SourceBackfill,
+		State:       StateFiring,
+	}}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	from, to := begin.Add(time.Hour), begin.Add(2*time.Hour)
+	eps, err := db.ListEpisodesInWindow(ctx, from, to)
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(eps) != 0 {
+		t.Errorf("ListEpisodesInWindow returned %d episodes, want 0: it ended before the window opened", len(eps))
+	}
+}
