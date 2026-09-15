@@ -71,9 +71,20 @@ const (
 		"it was built for; refusing to propose a rule noisefloor would not itself recognise"
 	// ReasonIntermittentTraffic is the scale-to-zero guard on the absent()
 	// rate template -- see probeRate.
-	ReasonIntermittentTraffic RefusalReason = "this service's request series went absent at least once in the " +
-		"last 24h (scale-to-zero, a scaled-down deployment, a nightly batch): an absent() starter rule would " +
-		"already have paged for it, so it is not proposed"
+	ReasonIntermittentTraffic RefusalReason = "this service's request series went absent at least once " +
+		"during the probe's lookback window (scale-to-zero, a scaled-down deployment, a weekly or nightly " +
+		"batch): an absent() starter rule would already have paged for it, so it is not proposed"
+	// ReasonInsufficientHistory is probeRate finding no `up` history at all
+	// for this service across the whole lookback window -- either the
+	// service is younger than the window or Prometheus does not retain that
+	// far back. There is then no evidence either way about whether this
+	// service legitimately goes quiet, and "no evidence" must not be read
+	// as "confirmed continuous": refusing is the safe answer, since a wrong
+	// guess here is a page-severity rule firing on a batch job's normal
+	// silence.
+	ReasonInsufficientHistory RefusalReason = "not enough historical `up` data for this service across the " +
+		"probe's lookback window to confirm it doesn't legitimately go quiet (scale-to-zero, a weekly batch); " +
+		"refusing rather than guessing"
 )
 
 // StarterPriority is the order propose tries signals in for one blind-spot
@@ -240,22 +251,38 @@ var durationHistogramMetrics = []string{
 // adding a second mechanism.
 var saturationMetrics = []string{"process_resident_memory_bytes"}
 
-// quietWindow is how far back probeRate looks for a period in which this
-// service's request series was not there at all. One full day: a scale-to-
-// zero deployment, a nightly batch and an overnight scale-down all repeat
-// on exactly that cycle, and a shorter window run at the wrong hour sees
-// nothing.
-const quietWindow = 24 * time.Hour
+// quietWindowFor is how far back probeRate looks for a period in which this
+// service's request series was not there at all, derived from the same
+// scanWindow (config Window, default 30 days) every other measurement in
+// this project already treats as its trusted evidence horizon -- rather
+// than a second, shorter, ad hoc number invented just for this one check.
+//
+// A fixed 24h window (this file's previous choice) is invisible to exactly
+// the cases B4 exists to catch: a WEEKLY scale-to-zero (a Sunday-only batch,
+// a once-a-week maintenance window) never appears inside a single day no
+// matter which day the probe happens to run on, and any quiet period that
+// falls outside a 24h lookback is indistinguishable from one that never
+// happened. Reusing scanWindow means the same 30 days of history this
+// project already relies on for every other measured claim sees roughly
+// four full weekly cycles here too, so a single missed week cannot hide the
+// pattern -- and a service younger than scanWindow, or a Prometheus that
+// simply does not retain that far back, falls into the "insufficient
+// history" refusal below rather than a false clean bill.
+func quietWindowFor(scanWindow time.Duration) time.Duration {
+	return scanWindow
+}
 
-// quietStep is the resolution probeRate samples quietWindow at. Comfortably
-// finer than the 10m `for:` the rate template proposes, so a gap long
-// enough to have paged cannot fall between two samples.
+// quietStep is the resolution probeRate samples the quiet window at.
+// Comfortably finer than the 10m `for:` the rate template proposes, so a
+// gap long enough to have paged cannot fall between two samples.
 const quietStep = 5 * time.Minute
 
 // probeRate finds the first request/operation counter this service exposes,
 // then checks whether that series has actually been continuously present --
-// see rateTemplate for why a starter absent() rule is refused if it has not.
-func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, now time.Time) (starterMeasurement, error) {
+// see rateTemplate for why a starter absent() rule is refused if it has
+// not, and ReasonInsufficientHistory for why "no evidence either way" is
+// also a refusal rather than a silent pass.
+func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, scanWindow time.Duration, now time.Time) (starterMeasurement, error) {
 	sel := serviceSelector(svc)
 	for _, metric := range requestCounterMetrics {
 		vec, err := queryVector(ctx, api, fmt.Sprintf("%s{%s}", metric, sel), now)
@@ -266,11 +293,14 @@ func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, now t
 			continue
 		}
 		m := starterMeasurement{Supported: true, MetricUsed: metric, Selector: sel}
-		quiet, err := wentQuiet(ctx, api, metric, sel, now)
+		quiet, sufficient, err := wentQuiet(ctx, api, metric, sel, quietWindowFor(scanWindow), now)
 		if err != nil {
 			return starterMeasurement{}, err
 		}
-		if quiet {
+		switch {
+		case !sufficient:
+			m.Refuse = ReasonInsufficientHistory
+		case quiet:
 			m.Refuse = ReasonIntermittentTraffic
 		}
 		return m, nil
@@ -278,27 +308,41 @@ func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, now t
 	return starterMeasurement{}, nil
 }
 
-// wentQuiet reports whether metric{sel} was absent at any point in
-// quietWindow while the service's own targets were still being scraped.
+// wentQuiet reports whether metric{sel} was absent at any point in window
+// while the service's own targets were still being scraped (quiet), and
+// whether there was enough `up` history in window to trust that verdict at
+// all (sufficient).
 //
-// The `and count(up{sel}) > 0` half is what makes this a measurement rather
-// than an artefact: absent() is equally true before a service was ever
-// scraped, so without it every service in a Prometheus younger than
-// quietWindow would look like it scales to zero. Gating on `up` restricts
-// the question to steps where this service existed and Prometheus was
-// watching it, which is exactly the period an absent() rule would have been
-// evaluating over.
-func wentQuiet(ctx context.Context, api prom.Client, metric, sel string, now time.Time) (bool, error) {
-	query := fmt.Sprintf("max_over_time(((absent(%s{%s}) or vector(0)) and (count(up{%s}) > 0))[%s:%s])",
-		metric, sel, sel, formatRange(quietWindow), formatRange(quietStep))
+// The `and on() (count(up{sel}) > 0)` half is what makes this a measurement
+// rather than an artefact: absent() is equally true before a service was
+// ever scraped, so without gating on `up` every service in a Prometheus
+// younger than window would look like it scales to zero. The `on()` is not
+// decorative -- absent(metric{sel}) returns a series carrying sel's own
+// labels (e.g. {job="x"}), while count(up{sel}) > 0 returns one series with
+// NO labels ({}), and PromQL's `and` defaults to requiring identical label
+// sets between its two sides. Without on(), the label sets never match, the
+// absent side is silently dropped, and the query returns 0 even for a
+// metric that has never existed -- which is exactly the defect B4 was
+// supposed to prevent (the guard never fired). `on()` matches ignoring
+// every label, so the gate is applied by truth value alone; the absent
+// side's own labels are preserved in the output, and queryScalarSum summing
+// the (at most two) resulting series is still correctly ">0" exactly when
+// the service really did go quiet while being watched.
+func wentQuiet(ctx context.Context, api prom.Client, metric, sel string, window time.Duration, now time.Time) (quiet, sufficient bool, err error) {
+	query := fmt.Sprintf("max_over_time(((absent(%s{%s}) or vector(0)) and on() (count(up{%s}) > 0))[%s:%s])",
+		metric, sel, sel, formatRange(window), formatRange(quietStep))
 	value, ok, err := queryScalarSum(ctx, api, query, now)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	// ok=false means the gate never opened: Prometheus has no `up` history
-	// for this service in the window at all, so there is nothing to
-	// conclude either way and the template is not refused on no evidence.
-	return ok && value > 0, nil
+	// ok=false means the gate never opened anywhere in window: Prometheus
+	// has no `up` history for this service across the whole lookback, so
+	// there is nothing to conclude either way. That USED to mean "not
+	// refused" -- no evidence of scaling to zero was read as proof it
+	// doesn't -- which is backwards: a probe that cannot see far enough
+	// back to be confident should refuse, not propose. sufficient=false
+	// says exactly that, and the caller refuses on it.
+	return ok && value > 0, ok, nil
 }
 
 // probeErrors finds a request counter that also carries an HTTP-style
@@ -399,11 +443,15 @@ func probeSaturation(ctx context.Context, api prom.Client, svc coverage.Service,
 	return starterMeasurement{}, nil
 }
 
-// probe dispatches to the right probeXxx for sig.
-func probe(ctx context.Context, api prom.Client, svc coverage.Service, sig coverage.Signal, now time.Time) (starterMeasurement, error) {
+// probe dispatches to the right probeXxx for sig. scanWindow is only used
+// by SignalRate (see quietWindowFor); every other probe's own window
+// (probeWindow) is fixed regardless of the configured scan window, since
+// those derive a threshold from CURRENT behaviour rather than looking for a
+// historical gap.
+func probe(ctx context.Context, api prom.Client, svc coverage.Service, sig coverage.Signal, scanWindow time.Duration, now time.Time) (starterMeasurement, error) {
 	switch sig {
 	case coverage.SignalRate:
-		return probeRate(ctx, api, svc, now)
+		return probeRate(ctx, api, svc, scanWindow, now)
 	case coverage.SignalErrors:
 		return probeErrors(ctx, api, svc, now)
 	case coverage.SignalLatency:
@@ -829,9 +877,15 @@ type StarterInput struct {
 
 	// Idle mirrors coverage.BlindSpot.Idle for this service.
 	Idle bool
-	// ExistingMatches is sc.Covered[Signal] for this service -- empty for a
-	// genuine blind spot. See ReasonUncertainCoverage: non-empty but
-	// entirely non-Certain matches are refused rather than proposed over.
+	// ExistingMatches is sc.Covered[Signal] for this service, FILTERED to
+	// matched-scope matches only (see RunStarters' matchedOnly) -- empty for
+	// a genuine blind spot. A global-scope match (a cluster-wide rule such
+	// as `up == 0`) is real coverage and the grid says so, but it does not
+	// answer whether THIS service is watched specifically -- the same
+	// distinction RankBlindSpots' own AnyScopedCoverage makes -- so it must
+	// never reach the "genuinely covered, nothing to propose" branch below.
+	// See ReasonUncertainCoverage: non-empty but entirely non-Certain
+	// matches are refused rather than proposed over.
 	ExistingMatches []coverage.RuleMatch
 
 	Measurement starterMeasurement

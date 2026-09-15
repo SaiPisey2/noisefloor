@@ -30,6 +30,10 @@ func searchService() coverage.Service {
 
 var starterTarget = Target{File: "testdata/starter_fixture.yml", Group: "services"}
 
+// testScanWindow stands in for config.Config.Window in tests that call
+// probeRate directly -- see quietWindowFor.
+const testScanWindow = 30 * 24 * time.Hour
+
 // --- template golden tests -------------------------------------------------
 
 func TestRateTemplateGolden(t *testing.T) {
@@ -327,9 +331,20 @@ func TestBuildStarterRefusesNoMetric(t *testing.T) {
 }
 
 // TestBuildStarterRefusesUncertainCoverage exercises a condition that is
-// structurally unreachable through RunStarters' own scope (a genuine blind
-// spot, by RankBlindSpots' definition, has zero matches on every signal) --
-// kept explicit and independently tested the same way pr.Build documents
+// unreachable through RunStarters specifically BECAUSE RunStarters filters
+// ExistingMatches to matched-scope only (matchedOnly) before calling
+// BuildStarter: a genuine blind spot, by RankBlindSpots'/AnyScopedCoverage's
+// definition, has zero MATCHED-scope matches on every signal.
+//
+// That claim used to be false, worded as "zero matches on every signal"
+// with no mention of scope: RunStarters passed sc.Covered[sig] straight
+// through unfiltered, so a genuine blind spot carrying an uncertain
+// GLOBAL match (or, worse, a CERTAIN one -- see
+// TestRunStartersProposesDespiteAGlobalCertainMatch) reached this branch
+// for real, and a cluster-wide rule such as `up == 0` could turn into a
+// wrong ReasonUncertainCoverage refusal, or silently swallow the proposal
+// with none at all. BuildStarter's own contract is kept explicit and
+// independently tested here regardless, the same way pr.Build documents
 // its own currently-unreachable confidence-floor check.
 func TestBuildStarterRefusesUncertainCoverage(t *testing.T) {
 	in := StarterInput{
@@ -545,7 +560,7 @@ func TestProbeRateFindsExposedMetric(t *testing.T) {
 		}
 		return model.Vector{}, nil
 	}}
-	m, err := probeRate(context.Background(), api, searchService(), time.Now())
+	m, err := probeRate(context.Background(), api, searchService(), testScanWindow, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +571,7 @@ func TestProbeRateFindsExposedMetric(t *testing.T) {
 
 func TestProbeRateUnsupportedWhenNoRequestCounterExists(t *testing.T) {
 	api := fakeInstantAPI{respond: func(string) (model.Value, error) { return model.Vector{}, nil }}
-	m, err := probeRate(context.Background(), api, searchService(), time.Now())
+	m, err := probeRate(context.Background(), api, searchService(), testScanWindow, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +641,7 @@ func quietAPI(everAbsent bool) fakeInstantAPI {
 // service was handed a rule that pages every night. Idle does not catch it:
 // idle is a thirty-day average, and sixteen busy hours average out as busy.
 func TestProbeRateRefusesAServiceThatScalesToZero(t *testing.T) {
-	m, err := probeRate(context.Background(), quietAPI(true), searchService(), time.Now())
+	m, err := probeRate(context.Background(), quietAPI(true), searchService(), testScanWindow, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +669,7 @@ func TestProbeRateRefusesAServiceThatScalesToZero(t *testing.T) {
 // TestProbeRateAcceptsContinuousTraffic is the other half: a service whose
 // series never went away still gets the rate template.
 func TestProbeRateAcceptsContinuousTraffic(t *testing.T) {
-	m, err := probeRate(context.Background(), quietAPI(false), searchService(), time.Now())
+	m, err := probeRate(context.Background(), quietAPI(false), searchService(), testScanWindow, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,11 +678,14 @@ func TestProbeRateAcceptsContinuousTraffic(t *testing.T) {
 	}
 }
 
-// TestProbeRateDoesNotRefuseOnNoHistory: a Prometheus younger than the
+// TestProbeRateRefusesOnInsufficientHistory: a Prometheus younger than the
 // quiet window has no `up` history to gate on, and absent() is equally true
-// before a service was ever scraped. No evidence must not read as evidence
-// of scaling to zero.
-func TestProbeRateDoesNotRefuseOnNoHistory(t *testing.T) {
+// before a service was ever scraped -- so there is no evidence either way
+// about whether this service legitimately goes quiet. That USED to be read
+// as "not refused" (no evidence of scaling to zero taken as proof it
+// doesn't), which is backwards for a page-severity starter rule: a probe
+// that cannot see far enough back to be confident must refuse, not guess.
+func TestProbeRateRefusesOnInsufficientHistory(t *testing.T) {
 	api := fakeInstantAPI{respond: func(query string) (model.Value, error) {
 		if strings.Contains(query, "max_over_time") {
 			return model.Vector{}, nil // the `up` gate never opened
@@ -677,12 +695,12 @@ func TestProbeRateDoesNotRefuseOnNoHistory(t *testing.T) {
 		}
 		return model.Vector{}, nil
 	}}
-	m, err := probeRate(context.Background(), api, searchService(), time.Now())
+	m, err := probeRate(context.Background(), api, searchService(), testScanWindow, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Refuse != "" {
-		t.Errorf("Refuse = %q, want none: there was no history to conclude anything from", m.Refuse)
+	if m.Refuse != ReasonInsufficientHistory {
+		t.Errorf("Refuse = %q, want ReasonInsufficientHistory: there was no history to conclude anything from", m.Refuse)
 	}
 }
 
@@ -791,4 +809,70 @@ func keysOf(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestRunStartersProposesDespiteAGlobalCertainMatch is N2: a cluster-wide,
+// CERTAIN rule such as `up == 0` (Scope "global") must not suppress the
+// rate starter for a genuine blind spot. Before matchedOnly filtered
+// StarterInput.ExistingMatches, BuildStarter saw this global match, judged
+// the service "genuinely covered" (any certain match, regardless of scope)
+// and returned (nil, nil, nil) -- no proposal AND no refusal, so the
+// service vanished from RunStarters' output entirely. Since `up == 0`
+// exists in nearly every real Prometheus, this made the rate template dead
+// fleet-wide.
+func TestRunStartersProposesDespiteAGlobalCertainMatch(t *testing.T) {
+	api := fakeInstantAPI{respond: func(query string) (model.Value, error) {
+		if !strings.Contains(query, `job="search"`) {
+			return model.Vector{}, nil
+		}
+		if strings.Contains(query, "max_over_time") {
+			return model.Vector{{Metric: model.Metric{}, Value: 0}}, nil // never went quiet
+		}
+		if strings.Contains(query, "http_requests_total") {
+			return vectorOf(model.Metric{"job": "search", "code": "200"}), nil
+		}
+		return model.Vector{}, nil
+	}}
+
+	grid := []coverage.ServiceCoverage{{
+		Service: coverage.Service{
+			Name: "search", Job: "search", Source: "job", Up: true,
+			Traffic: 40.12, TrafficBasis: coverage.BasisRequests,
+		},
+		Covered: map[coverage.Signal][]coverage.RuleMatch{
+			// A cluster-wide `up == 0`-shaped rule: certain, but global --
+			// real coverage (the grid says so), but not specific to
+			// "search", so it must not count as ExistingMatches here.
+			coverage.SignalRate: {
+				{GroupName: "org", AlertName: "TargetDown", Signal: coverage.SignalRate, Certain: true, Scope: "global"},
+			},
+		},
+	}}
+
+	cfg := config.Default()
+	cfg.Rules.Path = "testdata"
+	cfg.Coverage.RuleTargets = map[string]config.RuleTarget{
+		"search": {File: starterTarget.File, Group: starterTarget.Group},
+	}
+
+	res, err := RunStarters(context.Background(), NewFakeProvider(), api, cfg,
+		coverage.Result{Grid: grid}, time.Now(), RunOptions{})
+	if err != nil {
+		t.Fatalf("RunStarters: %v", err)
+	}
+
+	for _, r := range res.Refusals {
+		if r.Group == "search" {
+			t.Errorf("unexpected refusal for search: %+v (global TargetDown match must not block the rate starter)", r)
+		}
+	}
+	found := false
+	for _, p := range res.Proposals {
+		if p.AlertName == "SearchNoTraffic" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no SearchNoTraffic proposal; got proposals=%v refusals=%v", res.Proposals, res.Refusals)
+	}
 }

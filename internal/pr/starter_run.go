@@ -60,6 +60,32 @@ func resolveTarget(sc coverage.ServiceCoverage, cfg config.Config, locByKey map[
 	return Target{}
 }
 
+// matchedOnly returns only the matches in ms whose Scope is "matched",
+// dropping global-scope matches before they ever reach BuildStarter.
+//
+// N2: BuildStarter's existing-coverage check (see StarterInput.
+// ExistingMatches) treats ANY certain match as "genuinely covered, nothing
+// to propose" -- correct for a rule that names this service, but not for
+// one that sweeps up every service in the cluster. Before this filter,
+// sc.Covered[sig] (which MapRules populates with both scopes) was passed
+// through unfiltered, so a cluster-wide certain rule such as `up == 0`
+// silently suppressed the rate starter for every blind-spot service in the
+// fleet -- no proposal, no refusal, the signal simply absent from the
+// output. Filtering to matched-scope here keeps BuildStarter's contract
+// ("existing match means covered") true only for the kind of match
+// RankBlindSpots itself already treats as covering a service
+// (AnyScopedCoverage), rather than reintroducing global attribution through
+// the one path that was not yet checking for it.
+func matchedOnly(ms []coverage.RuleMatch) []coverage.RuleMatch {
+	var out []coverage.RuleMatch
+	for _, m := range ms {
+		if m.Scope == "matched" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // RunStarters is coverage's counterpart to Run: it proposes at most one
 // starter-rule pull request per blind-spot service found by
 // coverage.RankBlindSpots (see StarterPriority for which signal), reusing
@@ -90,13 +116,18 @@ func RunStarters(ctx context.Context, provider Provider, api prom.Client, cfg co
 		sc := byName[bs.Service.Name]
 
 		for _, sig := range StarterPriority {
-			m, err := probe(ctx, api, sc.Service, sig, now)
+			m, err := probe(ctx, api, sc.Service, sig, cfg.Window.Std(), now)
 			if err != nil {
 				return res, fmt.Errorf("%s: probe %s: %w", sc.Service.Name, sig, err)
 			}
 			in := StarterInput{
 				Service: sc.Service, Signal: sig,
-				ExistingMatches: sc.Covered[sig],
+				// Filtered to matched-scope only, consistent with
+				// RankBlindSpots'/AnyScopedCoverage's own definition of
+				// "covered" -- see StarterInput.ExistingMatches's doc
+				// comment for why a global match must not reach
+				// BuildStarter here.
+				ExistingMatches: matchedOnly(sc.Covered[sig]),
 				Measurement:     m,
 				Target:          resolveTarget(sc, cfg, locByKey),
 			}
