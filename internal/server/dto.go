@@ -113,7 +113,17 @@ func newCounterfactualAPI(p90 time.Duration, cf remediate.Counterfactual) counte
 
 type ruleDetailAPI struct {
 	ruleAPI
+	// Episodes is one page of this rule's episodes, most recent first --
+	// bounded by EpisodesLimit/EpisodesOffset (see episodePaginationParams
+	// and store.ListEpisodesForRule), never the rule's whole history. A
+	// flapping rule can accumulate tens of thousands of episodes; without
+	// this, one request for one rule could allocate on the order of 100MB.
+	// EpisodesTotal is the true count (store.CountEpisodesForRule) a
+	// client pages through with `?limit=` and `?offset=`.
 	Episodes       []episodeAPI       `json:"episodes"`
+	EpisodesTotal  int                `json:"episodes_total"`
+	EpisodesLimit  int                `json:"episodes_limit"`
+	EpisodesOffset int                `json:"episodes_offset"`
 	Silences       []silenceAPI       `json:"silences,omitempty"`
 	Counterfactual *counterfactualAPI `json:"counterfactual,omitempty"`
 }
@@ -197,13 +207,16 @@ type signalRow struct {
 	Weighted     bool
 }
 
-// ruleDetail is the rule-detail page's whole view model.
+// ruleDetail is the rule-detail page's whole view model. It deliberately
+// does not carry a raw episode list -- see loadRuleDetail's doc comment --
+// only EpisodesTotal, the exact count a paginated caller states alongside
+// its own bounded page.
 type ruleDetail struct {
 	Rule                   store.Rule
 	Score                  store.Score
 	HasScore               bool
 	Signals                []signalRow
-	Episodes               []store.Episode
+	EpisodesTotal          int
 	Timeline               timeline
 	Silences               []store.Silence
 	Counterfactual         *remediate.Counterfactual

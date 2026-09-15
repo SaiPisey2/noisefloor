@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
-	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect"
 	"github.com/SaiPisey2/noisefloor/internal/coverage"
@@ -141,21 +140,43 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 
 // --- rule detail ------------------------------------------------------
 
+// loadRuleDetail builds the rule-detail page's whole view model, EXCEPT
+// the paginated raw episode list the JSON API states -- see
+// handleAPIRuleDetail, which fetches its own bounded page separately. This
+// keeps the shape both the HTML page and the JSON API share (rule, score,
+// signals, timeline, silences, counterfactual) built exactly once, without
+// forcing the HTML page (which never renders a raw episode list, only the
+// SVG timeline) to hold one in memory just because the API needs one.
 func (s *Server) loadRuleDetail(ctx context.Context, id int64) (ruleDetail, bool, error) {
 	rule, ok, err := s.db.GetRule(ctx, id)
 	if err != nil || !ok {
 		return ruleDetail{}, ok, err
 	}
 
-	episodes, err := s.db.ListEpisodesForRule(ctx, id)
+	total, err := s.db.CountEpisodesForRule(ctx, id)
 	if err != nil {
 		return ruleDetail{}, true, err
 	}
+	detail := ruleDetail{Rule: rule, EpisodesTotal: total}
 
-	detail := ruleDetail{
-		Rule:     rule,
-		Episodes: episodes,
-		Timeline: newTimeline(episodes, s.nowFunc()),
+	// A rule with more episodes than store.MaxTimelineEpisodes gets a
+	// bucketed summary computed entirely in SQL (O(bucket count) memory)
+	// instead of one store.Episode -- labels map, fingerprint string and
+	// all -- fetched and held per episode. See store.EpisodeTimelineSummary
+	// and store.MaxTimelineEpisodes's doc comments for why the threshold
+	// sits where it does.
+	if total > store.MaxTimelineEpisodes {
+		buckets, bucketWidth, windowStart, windowEnd, _, err := s.db.EpisodeTimelineSummary(ctx, id, s.nowFunc(), store.TimelineBuckets)
+		if err != nil {
+			return ruleDetail{}, true, err
+		}
+		detail.Timeline = newBucketedTimeline(buckets, bucketWidth, total, windowStart, windowEnd, s.nowFunc())
+	} else {
+		episodes, err := s.db.ListEpisodesForRule(ctx, id, store.MaxTimelineEpisodes, 0)
+		if err != nil {
+			return ruleDetail{}, true, err
+		}
+		detail.Timeline = newTimeline(episodes, s.nowFunc())
 	}
 
 	sc, hasScore, err := s.db.GetLatestScore(ctx, id)
@@ -169,13 +190,25 @@ func (s *Server) loadRuleDetail(ctx context.Context, id int64) (ruleDetail, bool
 	detail.Score = sc
 	detail.Signals = buildSignalRows(sc.Signals, s.cfg.Weights)
 
-	var firing []store.Episode
-	var durations []time.Duration
-	for _, e := range episodes {
-		if e.State == store.StateFiring {
-			firing = append(firing, e)
-			durations = append(durations, e.Duration())
-		}
+	// The window a stored score was actually computed over, not this
+	// rule's entire history: internal/pr's tune proposal for this same
+	// rule derives its counterfactual from exactly this set (see
+	// internal/scanner.RuleEval.Durations, filled from
+	// ListEpisodesInWindow), so building it from anything wider -- as this
+	// used to, from every episode ever recorded -- let the page propose a
+	// candidate `for:` a `noisefloor remediate` run for the same rule
+	// would never make.
+	//
+	// Two separate queries, not one: CoveringSilences needs full episodes
+	// (their labels, to match a silence's matchers), which is the
+	// expensive shape to fetch at scale, while the counterfactual only
+	// needs durations. Capping the cheap query far higher than the
+	// expensive one keeps a dense window's counterfactual accurate without
+	// paying for tens of thousands of label maps just to compute it -- see
+	// store.MaxWindowEpisodes and store.MaxWindowDurations.
+	firing, err := s.db.ListFiringEpisodesForRuleInWindow(ctx, id, sc.WindowStart, sc.WindowEnd)
+	if err != nil {
+		return ruleDetail{}, true, err
 	}
 
 	silences, err := s.db.ListSilences(ctx, sc.WindowStart, sc.WindowEnd)
@@ -184,13 +217,26 @@ func (s *Server) loadRuleDetail(ctx context.Context, id int64) (ruleDetail, bool
 	}
 	detail.Silences = collect.CoveringSilences(rule.AlertName, firing, silences)
 
-	if sc.Verdict == score.VerdictTune && len(firing) > 0 {
-		p90 := durationOf(sc.Signals, "p90_duration_s")
-		candidate := remediate.SelectCandidateFor(durations, rule.For)
-		cf := remediate.Compute(durations, rule.For, candidate, remediate.DefaultLongThreshold(candidate))
-		detail.Counterfactual = &cf
-		detail.CounterfactualSentence = remediate.Sentence(p90, cf)
-		detail.P90 = p90
+	if sc.Verdict == score.VerdictTune {
+		durations, err := s.db.ListFiringDurationsForRuleInWindow(ctx, id, sc.WindowStart, sc.WindowEnd)
+		if err != nil {
+			return ruleDetail{}, true, err
+		}
+		if len(durations) > 0 {
+			// The PR bot's own formula (internal/pr's buildTune): current
+			// `for:` plus the rule's P90 firing duration, taken from the
+			// signal a scan already persisted rather than by re-deriving a
+			// P90 from this handler's own (possibly differently-windowed,
+			// now fixed but worth keeping self-consistent) duration slice
+			// with remediate.SelectCandidateFor. Same input, same formula,
+			// same answer -- see TestRuleDetailCounterfactualMatchesPRBot.
+			p90 := durationOf(sc.Signals, "p90_duration_s")
+			candidate := rule.For + p90
+			cf := remediate.Compute(durations, rule.For, candidate, remediate.DefaultLongThreshold(candidate))
+			detail.Counterfactual = &cf
+			detail.CounterfactualSentence = remediate.Sentence(p90, cf)
+			detail.P90 = p90
+		}
 	}
 
 	return detail, true, nil
@@ -332,11 +378,21 @@ func (s *Server) handleAPIRuleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, offset := episodePaginationParams(r)
+	episodes, err := s.db.ListEpisodesForRule(r.Context(), id, limit, offset)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+
 	out := ruleDetailAPI{ruleAPI: newRuleAPI(detail.Rule, nil)}
 	if detail.HasScore {
 		out.Score = newScoreAPI(detail.Score)
 	}
-	for _, e := range detail.Episodes {
+	out.EpisodesTotal = detail.EpisodesTotal
+	out.EpisodesLimit = limit
+	out.EpisodesOffset = offset
+	for _, e := range episodes {
 		out.Episodes = append(out.Episodes, newEpisodeAPI(e))
 	}
 	for _, sil := range detail.Silences {

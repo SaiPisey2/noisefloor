@@ -55,8 +55,11 @@
 <p class="empty">No episodes recorded.</p>
 {{else}}
 <p class="lede">{{$d.Timeline.WindowStart.Format "2006-01-02"}} to {{$d.Timeline.WindowEnd.Format "2006-01-02"}}. Top lane is firing time, bottom lane is pending (below <code>for:</code>) time. A dense band is flapping; the percentages above are the summary of exactly this picture.</p>
+{{- if $d.Timeline.Bucketed}}
+<p class="lede">Showing a {{$d.Timeline.BucketCount}}-bucket summary of {{$d.Timeline.TotalEpisodes}} episodes -- too many to draw one rectangle each. Darker bars are busier buckets.</p>
+{{- end}}
 <svg class="timeline" viewBox="0 0 {{$d.Timeline.ViewWidth}} {{$d.Timeline.ViewHeight}}" preserveAspectRatio="none" role="img" aria-label="Episode timeline">
-{{range $d.Timeline.Bars}}<rect x="{{.X}}" y="{{.Y}}" width="{{.Width}}" height="18" class="{{if .Firing}}bar-firing{{else}}bar-pending{{end}}"><title>{{.Title}}</title></rect>
+{{range $d.Timeline.Bars}}<rect x="{{.X}}" y="{{.Y}}" width="{{.Width}}" height="18" class="{{if .Firing}}bar-firing{{else}}bar-pending{{end}}"{{if $d.Timeline.Bucketed}} fill-opacity="{{printf "%.2f" .Opacity}}"{{end}}><title>{{.Title}}</title></rect>
 {{end}}</svg>
 {{end}}
 </section>

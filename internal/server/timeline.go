@@ -1,6 +1,8 @@
 package server
 
 import (
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/store"
@@ -33,6 +35,13 @@ type episodeBar struct {
 	Y        float64
 	Firing   bool
 	Title    string // rendered as an SVG <title> child; html/template escapes it
+	// Opacity is fill-opacity for this bar, an SVG presentation attribute
+	// (not a CSS style, so it costs nothing under the strict
+	// Content-Security-Policy this server sends -- see server.go). 1 for an
+	// exact, one-bar-per-episode rendering; in bucketed mode it scales with
+	// how many episodes the bucket represents, so a dense run of flapping
+	// still reads as more solid than a quiet one.
+	Opacity float64
 }
 
 // timeline is the rule-detail page's episode-timeline view model: the
@@ -44,19 +53,36 @@ type timeline struct {
 	ViewWidth   float64
 	ViewHeight  float64
 	Empty       bool
+
+	// Bucketed is true when Bars are EpisodeTimelineSummary's fixed-width
+	// aggregates rather than one bar per episode -- this rule has more
+	// episodes than MaxTimelineEpisodes, so drawing one rectangle each
+	// would be both unreadable (bars sub-pixel wide) and, unbounded, a
+	// per-request memory cost that scales with a flapping rule's entire
+	// history. The template states this explicitly rather than rendering
+	// a plausible-looking picture that silently dropped most of the data.
+	Bucketed      bool
+	TotalEpisodes int
+	BucketCount   int
 }
 
-// newTimeline lays out eps (already sorted oldest-first by
-// ListEpisodesForRule) onto a fixed-width view box spanning from the
+// newTimeline lays out eps onto a fixed-width view box spanning from the
 // earliest episode's start to the later of the last episode's end or now --
 // so a still-firing episode's bar reaches the right edge rather than
 // implying the window ended when the query did.
+//
+// eps is sorted oldest-first here rather than assumed to arrive that way:
+// store.ListEpisodesForRule orders most-recent-first (what pagination
+// wants), so this is the one place that order is turned back into the
+// chronological draw order a reviewer scanning left-to-right expects.
 func newTimeline(eps []store.Episode, now time.Time) timeline {
 	tl := timeline{ViewWidth: timelineViewWidth, ViewHeight: timelineViewHeight}
 	if len(eps) == 0 {
 		tl.Empty = true
 		return tl
 	}
+	eps = append([]store.Episode(nil), eps...)
+	sort.Slice(eps, func(i, j int) bool { return eps[i].StartedAt.Before(eps[j].StartedAt) })
 
 	tl.WindowStart = eps[0].StartedAt
 	tl.WindowEnd = eps[0].EndedAt
@@ -89,9 +115,91 @@ func newTimeline(eps []store.Episode, now time.Time) timeline {
 			y = timelinePendingY
 		}
 		tl.Bars = append(tl.Bars, episodeBar{
-			X: x, Width: w, Y: y, Firing: e.State == store.StateFiring,
+			X: x, Width: w, Y: y, Firing: e.State == store.StateFiring, Opacity: 1,
 			Title: e.State + " " + e.StartedAt.Format(time.RFC3339) + " (" + formatDuration(e.Duration()) + ")",
 		})
 	}
 	return tl
+}
+
+// newBucketedTimeline lays out store.EpisodeTimelineSummary's fixed-width
+// buckets onto the same view box newTimeline uses, one bar per non-empty
+// lane per bucket instead of one bar per episode. total is the exact
+// episode count EpisodeTimelineSummary counted (not the number of buckets
+// or bars), stated on the page so this reads as a summary, not a picture
+// that happens to look complete.
+func newBucketedTimeline(buckets []store.EpisodeBucket, bucketWidth time.Duration, total int, windowStart, windowEnd, now time.Time) timeline {
+	tl := timeline{
+		ViewWidth: timelineViewWidth, ViewHeight: timelineViewHeight,
+		Bucketed: true, TotalEpisodes: total, BucketCount: len(buckets),
+	}
+	if len(buckets) == 0 {
+		tl.Empty = true
+		return tl
+	}
+	tl.WindowStart, tl.WindowEnd = windowStart, windowEnd
+	if now.After(tl.WindowEnd) {
+		tl.WindowEnd = now
+	}
+
+	span := tl.WindowEnd.Sub(tl.WindowStart)
+	if span <= 0 {
+		span = time.Second
+	}
+	scale := timelineViewWidth / span.Seconds()
+
+	// maxCount anchors the opacity scale: the busiest bucket (in either
+	// lane) renders fully solid, and every other bucket's opacity is
+	// relative to it -- so the picture shows WHERE episodes concentrate,
+	// not just that they exist somewhere in every bucket.
+	maxCount := 1
+	for _, b := range buckets {
+		if b.Firing > maxCount {
+			maxCount = b.Firing
+		}
+		if b.Pending > maxCount {
+			maxCount = b.Pending
+		}
+	}
+
+	for _, b := range buckets {
+		bucketStart := tl.WindowStart.Add(time.Duration(b.Index) * bucketWidth)
+		bucketEnd := bucketStart.Add(bucketWidth)
+		x := bucketStart.Sub(tl.WindowStart).Seconds() * scale
+		w := bucketWidth.Seconds() * scale
+		if w < timelineMinWidth {
+			w = timelineMinWidth
+		}
+		if b.Firing > 0 {
+			tl.Bars = append(tl.Bars, episodeBar{
+				X: x, Width: w, Y: timelineFiringY, Firing: true,
+				Opacity: bucketOpacity(b.Firing, maxCount),
+				Title: fmt.Sprintf("%d firing episode(s), %s to %s",
+					b.Firing, bucketStart.Format(time.RFC3339), bucketEnd.Format(time.RFC3339)),
+			})
+		}
+		if b.Pending > 0 {
+			tl.Bars = append(tl.Bars, episodeBar{
+				X: x, Width: w, Y: timelinePendingY, Firing: false,
+				Opacity: bucketOpacity(b.Pending, maxCount),
+				Title: fmt.Sprintf("%d pending episode(s), %s to %s",
+					b.Pending, bucketStart.Format(time.RFC3339), bucketEnd.Format(time.RFC3339)),
+			})
+		}
+	}
+	return tl
+}
+
+// bucketOpacity maps a bucket's episode count against the busiest bucket
+// to a fill-opacity, floored at 0.25 so even a lightly-populated bucket
+// stays visible rather than fading to nothing.
+func bucketOpacity(count, maxCount int) float64 {
+	if maxCount <= 0 {
+		return 1
+	}
+	o := 0.25 + 0.75*float64(count)/float64(maxCount)
+	if o > 1 {
+		o = 1
+	}
+	return o
 }
