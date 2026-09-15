@@ -1,0 +1,22 @@
+# Fixture rule file for internal/pr's starter-proposal tests
+# (starter_test.go). The "services" group already alerts on checkout's
+# saturation, which is what lets resolveTarget find it automatically for a
+# starter rule about a DIFFERENT signal on the same service; the "other"
+# group covers a service starter tests never target, so it can be used as
+# the wrong-group case for a target nomination that does not match.
+groups:
+  - name: services
+    rules:
+      - alert: CheckoutMemoryHigh
+        expr: process_resident_memory_bytes{job="checkout"} > 5e8
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "checkout resident memory high"}
+
+  - name: other
+    rules:
+      - alert: UnrelatedThing
+        expr: up{job="unrelated"} == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "unrelated"}
