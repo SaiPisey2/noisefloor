@@ -886,6 +886,15 @@ one of these next should add its config alongside it.
   should stop the scan, not quietly empty the report. A smaller drop proceeds
   normally, with the missing rules printed to stderr so routine cleanup is
   still visible.
+- `remediate -apply` and `propose -apply` are exercised against fixtures and a
+  fake forge, not against the GitHub API. Everything up to the write is proven
+  on real rule files -- the diff, the base-blob check, every refusal -- and the
+  dry run prints exactly what would be sent. The write itself has not run in
+  anger. Dry-run first.
+- The PagerDuty enricher is fixture-tested only; it has not been run against the
+  live API. Incident matching is a documented best-effort heuristic on alert
+  name and time proximity either way, which is why a pager-backed verdict reads
+  `measured` rather than certain.
 
 ## License
 
