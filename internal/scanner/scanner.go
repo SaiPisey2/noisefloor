@@ -18,6 +18,8 @@ import (
 	"github.com/SaiPisey2/noisefloor/internal/collect"
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/enrich"
+	"github.com/SaiPisey2/noisefloor/internal/enrich/pagerduty"
 	"github.com/SaiPisey2/noisefloor/internal/remediate"
 	"github.com/SaiPisey2/noisefloor/internal/report"
 	"github.com/SaiPisey2/noisefloor/internal/score"
@@ -123,6 +125,14 @@ type ScoreInput struct {
 	ObservedWindow time.Duration
 	Now            time.Time
 	Cfg            config.Config
+
+	// Enricher optionally supplies real pager outcomes for each rule's
+	// episodes (issue #14) -- nil (the default, and always the case when
+	// no enricher is configured) means every rule scores exactly as it
+	// did before this feature. A non-nil Enricher's failure for one rule
+	// is reported to stderr and that rule degrades to estimated scoring;
+	// it is never allowed to abort the scan -- see the warning below.
+	Enricher enrich.Enricher
 }
 
 type ScoreOutput struct {
@@ -190,10 +200,27 @@ func Score(ctx context.Context, db scoreStore, in ScoreInput) (ScoreOutput, erro
 		}
 		eval.SilencedBy = collect.CoveringSilences(r.AlertName, firing, in.Silences)
 
+		var measured *score.PagerOutcomes
+		if in.Enricher != nil {
+			res, eerr := in.Enricher.Enrich(ctx, r, eps, in.QueryStart, in.QueryEnd)
+			if eerr != nil {
+				// Degrade, never abort: exactly the posture an
+				// unreachable Alertmanager already has above (see
+				// RunFull's silencedRate handling). This rule's score
+				// falls back to duration/silence-derived signals alone.
+				fmt.Fprintf(os.Stderr,
+					"warning: %s enricher failed for rule %s/%s, scoring from estimated signals only: %v\n",
+					in.Enricher.Name(), r.GroupName, r.AlertName, eerr)
+			} else {
+				measured = score.AggregateOutcomes(res, len(firing))
+			}
+		}
+
 		signals := score.Compute(score.Input{
 			Rule: r, Episodes: eps, AllEpisodes: in.AllEpisodes,
 			Silences: in.Silences, Location: in.Cfg.Location(),
-			FlapWindow: in.Cfg.FlapWindow.Std(),
+			FlapWindow:    in.Cfg.FlapWindow.Std(),
+			PagerOutcomes: measured,
 		})
 		noise, confidence, verdict := score.Evaluate(signals, r, in.ObservedWindow, in.Now, in.Cfg)
 
@@ -358,6 +385,24 @@ func RunFull(ctx context.Context, cfg config.Config, db *store.SQLite, api prom.
 		}
 	}
 
+	// The pager enricher (issue #14) is entirely optional: unset
+	// pagerduty.service_ids (the default) leaves enricher nil, and every
+	// rule scores exactly as it did before this feature existed -- see
+	// score.PagerOutcomes. Construction failure (a malformed config that
+	// somehow got past Validate, or similar) is reported and degrades the
+	// whole scan to estimated scoring, the same posture as an unreachable
+	// Alertmanager above, rather than aborting.
+	var enricher enrich.Enricher
+	if cfg.PagerDuty.Configured() {
+		pd, perr := pagerduty.New(cfg.PagerDuty, &http.Client{Timeout: 30 * time.Second})
+		if perr != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: pagerduty enricher not started, scoring from estimated signals only: %v\n", perr)
+		} else {
+			enricher = pd
+		}
+	}
+
 	// Score against everything ever observed, not just this fetch.
 	// Alertmanager garbage-collects expired silences (120h by default), so a
 	// 30-day window can only ever see the older ones from our own store --
@@ -402,6 +447,7 @@ func RunFull(ctx context.Context, cfg config.Config, db *store.SQLite, api prom.
 		QueryStart: backfill.WindowStart, QueryEnd: backfill.WindowEnd,
 		SilencesAvailable: silencesAvailable,
 		ObservedWindow:    observedWindow, Now: now, Cfg: cfg,
+		Enricher: enricher,
 	})
 	if err != nil {
 		return FullResult{}, err

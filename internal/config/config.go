@@ -29,6 +29,10 @@ type Config struct {
 	// Webhook configures `noisefloor collect` only (issue #13); every other
 	// command ignores it.
 	Webhook Webhook `yaml:"webhook"`
+	// PagerDuty configures the optional pager enricher (issue #14). See
+	// its own doc comment: unset (or empty service_ids) changes nothing
+	// about how scan or remediate behave.
+	PagerDuty PagerDuty `yaml:"pagerduty"`
 }
 
 // Coverage configures `noisefloor coverage` only; scan and remediate never
@@ -193,6 +197,9 @@ func Default() Config {
 		Webhook: Webhook{
 			MaxBodyBytes: DefaultMaxBodyBytes,
 		},
+		PagerDuty: PagerDuty{
+			MatchWindow: defaultPagerDutyMatchWindow(),
+		},
 	}
 }
 
@@ -266,6 +273,17 @@ func (c Config) Validate() error {
 	}
 	if c.Webhook.MaxBodyBytes <= 0 {
 		return fmt.Errorf("webhook.max_body_bytes must be positive, got %d", c.Webhook.MaxBodyBytes)
+	}
+	if err := c.PagerDuty.Auth.Validate(); err != nil {
+		return err
+	}
+	if c.PagerDuty.Configured() {
+		if _, ok, _ := c.PagerDuty.Auth.Token(); !ok {
+			return fmt.Errorf("pagerduty.auth.api_token or api_token_file is required when pagerduty.service_ids is set")
+		}
+		if c.PagerDuty.MatchWindow.Std() <= 0 {
+			return fmt.Errorf("pagerduty.match_window must be positive")
+		}
 	}
 	return nil
 }

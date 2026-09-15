@@ -1,0 +1,23 @@
+{
+  "limit": 2,
+  "offset": 2,
+  "more": false,
+  "total": null,
+  "incidents": [
+    {
+      "id": "PINC0003",
+      "incident_number": 3,
+      "title": "DemoSpiky is firing",
+      "created_at": "2026-09-02T09:00:00Z",
+      "incident_key": "demo/DemoSpiky/ghi789",
+      "service": {"id": "PSERVICE1", "type": "service_reference", "summary": "demo"},
+      "status": "acknowledged",
+      "urgency": "high",
+      "acknowledgements": [
+        {"at": "2026-09-02T09:02:00Z", "acknowledger": {"id": "PUSER1", "type": "user_reference", "summary": "Alice"}}
+      ],
+      "last_status_change_at": "2026-09-02T09:02:00Z",
+      "last_status_change_by": {"id": "PUSER1", "type": "user_reference", "summary": "Alice"}
+    }
+  ]
+}

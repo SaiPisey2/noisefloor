@@ -80,10 +80,22 @@ type Signals struct {
 
 	PendingChurn  float64
 	Concentration float64
+
+	// PagerOutcomes is real pager evidence for this rule's episodes --
+	// acknowledged, escalated, resolved by a human or automatically --
+	// from an enricher (see internal/enrich), as opposed to every signal
+	// above, which is inferred from firing shape alone. Nil means no
+	// enricher was configured, or nothing matched this rule: every
+	// existing signal and its weight are completely unaffected, which is
+	// why a scan run without an enricher (every scan before this feature,
+	// and the demo, which configures none) is byte-for-byte unchanged. See
+	// verdict.go's Confidence and Verdict for exactly how -- and how
+	// conservatively -- this is allowed to move a score.
+	PagerOutcomes *PagerOutcomes
 }
 
 func (s Signals) Map() map[string]float64 {
-	return map[string]float64{
+	m := map[string]float64{
 		"fires":               float64(s.Fires),
 		"unique_fingerprints": float64(s.UniqueFingerprints),
 		"p50_duration_s":      s.P50Duration.Seconds(),
@@ -95,7 +107,24 @@ func (s Signals) Map() map[string]float64 {
 		"cofire_ratio":        s.CofireRatio,
 		"pending_churn":       s.PendingChurn,
 		"concentration":       s.Concentration,
+		"measured":            0,
 	}
+	// Measured evidence gets its own namespaced keys rather than
+	// overwriting any existing one -- see this field's doc comment:
+	// nothing above is rescaled by an enricher's presence, so nothing
+	// above should even LOOK different in the stored signals map for a
+	// scan that never fetched pager data.
+	if s.PagerOutcomes != nil {
+		p := s.PagerOutcomes
+		m["measured"] = 1
+		m["measured_coverage"] = p.Coverage
+		m["measured_matched"] = float64(p.Matched)
+		m["measured_ack_rate"] = p.AckRate
+		m["measured_escalation_rate"] = p.EscalationRate
+		m["measured_human_resolved_rate"] = p.HumanResolvedRate
+		m["measured_auto_resolved_rate"] = p.AutoResolvedRate
+	}
+	return m
 }
 
 type Input struct {
@@ -109,6 +138,13 @@ type Input struct {
 	// Zero means "use the default" (flapWindow, 1h), so existing callers that
 	// never set it keep today's behaviour unchanged.
 	FlapWindow time.Duration
+
+	// PagerOutcomes is real pager evidence for this rule's episodes,
+	// already aggregated (see AggregateOutcomes) by the caller -- Compute
+	// does not fetch it and does not know how it was derived, it only
+	// copies it onto the returned Signals. Nil (the default for every
+	// existing caller) changes nothing about the signals computed below.
+	PagerOutcomes *PagerOutcomes
 }
 
 func Compute(in Input) Signals {
@@ -136,7 +172,7 @@ func Compute(in Input) Signals {
 		fw = flapWindow
 	}
 
-	s := Signals{Fires: len(firing)}
+	s := Signals{Fires: len(firing), PagerOutcomes: in.PagerOutcomes}
 	if len(firing) == 0 {
 		s.PendingChurn = pendingChurn(pending, firing)
 		return s

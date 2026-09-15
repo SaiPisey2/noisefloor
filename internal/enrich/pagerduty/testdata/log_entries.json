@@ -1,0 +1,19 @@
+{
+  "limit": 100,
+  "offset": 0,
+  "more": false,
+  "log_entries": [
+    {
+      "id": "PLOG0001",
+      "type": "trigger_log_entry",
+      "created_at": "2026-09-01T14:00:00Z",
+      "incident": {"id": "PINC0002", "type": "incident_reference", "summary": "DemoSpiky is firing"}
+    },
+    {
+      "id": "PLOG0002",
+      "type": "escalate_log_entry",
+      "created_at": "2026-09-01T14:05:00Z",
+      "incident": {"id": "PINC0002", "type": "incident_reference", "summary": "DemoSpiky is firing"}
+    }
+  ]
+}

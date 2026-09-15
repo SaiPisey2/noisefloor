@@ -62,6 +62,63 @@ const (
 	automateMinFires    = 20
 	automateMaxShort    = 0.3
 	automateMinDuration = 15 * time.Minute
+
+	// --- measured pager evidence (issue #14) --------------------------
+	//
+	// Every constant below is a gate, not a rescale: none of them touch
+	// NoiseScore, and each only ever activates when Signals.PagerOutcomes
+	// is non-nil with enough coverage AND enough absolute samples to trust
+	// the aggregate -- see measuredSufficient. A scan with no enricher
+	// configured leaves PagerOutcomes nil for every rule, so every one of
+	// these is dead code for it: the demo's seven archetypes, and every
+	// verdict computed before this feature existed, are unaffected by
+	// construction, not by coincidence.
+
+	// measuredMinCoverage is the floor on PagerOutcomes.Coverage before its
+	// aggregate rates are trusted at all. Below half of a rule's episodes
+	// matched, the unmatched majority could look completely different --
+	// an aggregate over a minority sample is not evidence about the rule,
+	// it's evidence about whichever episodes happened to be easy to
+	// correlate.
+	measuredMinCoverage = 0.5
+	// measuredMinMatched is the floor on the ABSOLUTE number of matched
+	// episodes, alongside Coverage. A rule with two firing episodes and
+	// one matched page clears 50% coverage on a sample size of one, which
+	// proves nothing either way; this keeps a real sample size mandatory
+	// regardless of what the ratio says.
+	measuredMinMatched = 10
+
+	// valuableEngagementThreshold: at or above this ack-or-escalation
+	// rate (PagerOutcomes.engagementRate), a rule's pages were
+	// consistently acted on by a human. That is direct evidence the rule
+	// is VALUABLE -- someone keeps responding to it -- which argues
+	// against deleting it regardless of how short its episodes measure,
+	// since short-lived duration is only ever a PROXY for "nobody could
+	// act", and this is the actual fact the proxy was guessing at, saying
+	// the opposite. A retire verdict is downgraded to tune (never all the
+	// way to keep: high engagement says nothing about whether the rule
+	// also flaps or rides another incident, which the other signals may
+	// still be right about) rather than dropped outright.
+	valuableEngagementThreshold = 0.6
+
+	// neverAckedThreshold and neverAckedMinMatched implement the opposite,
+	// equally asymmetric case: a rule that paged repeatedly and was
+	// essentially never acknowledged is stronger retire evidence than
+	// episode duration alone can provide, because it is a direct
+	// observation of the exact thing retire is trying to justify --
+	// "nobody acts on this" -- rather than an inference from how long the
+	// condition lasted. This is deliberately narrow: it only ever
+	// upgrades an existing `keep` to `retire` (never invents a verdict
+	// out of a rule that also fails the base Fires/confidence gates
+	// earlier in this function, and never touches `tune` or `automate`,
+	// which are about a different problem than whether to delete the
+	// rule), and only on a sample large enough that "essentially never"
+	// isn't three unlucky misses -- neverAckedMinMatched is set well
+	// above measuredMinMatched for exactly that reason: this arm makes a
+	// stronger claim (retire, not just "trust the aggregate") and is held
+	// to a higher evidentiary bar for it.
+	neverAckedThreshold  = 0.02
+	neverAckedMinMatched = 50
 )
 
 // NoiseScore combines the weighted signals into a 0..100 score. Only the five
@@ -126,7 +183,29 @@ func Confidence(s Signals, window time.Duration, c config.Confidence) float64 {
 	}
 	base := math.Min(episodes, windowScore)
 
-	return base * fingerprintDiversityFactor(s)
+	return math.Min(1, base*fingerprintDiversityFactor(s)*measuredConfidenceFactor(s.PagerOutcomes))
+}
+
+// measuredConfidenceBoostMax bounds how much measured pager coverage can
+// ever raise confidence: at full coverage, a 15% multiplicative boost.
+// Deliberately small and deliberately capped (Confidence itself clamps the
+// result to 1 regardless) -- see PagerOutcomes and the constants above for
+// why the more consequential effects of measured evidence are gated
+// verdict-level overrides rather than pushed through here. This exists
+// because measured data replacing an INFERRED signal with an OBSERVED one
+// is more trustworthy evidence about the same episodes, independent of
+// what it shows either way, which is a materially weaker and more general
+// claim than "the rule is valuable" or "the rule is unwanted" -- so it
+// earns a small, symmetric, unconditional boost rather than a threshold-
+// gated one. A rule with no measured coverage (the default, absent an
+// enricher) gets a factor of exactly 1: no change.
+const measuredConfidenceBoostMax = 0.15
+
+func measuredConfidenceFactor(p *PagerOutcomes) float64 {
+	if p == nil || p.Coverage <= 0 {
+		return 1
+	}
+	return 1 + measuredConfidenceBoostMax*p.Coverage
 }
 
 // fingerprintDiversityFactor discounts confidence for fires concentrated on
@@ -180,7 +259,7 @@ func Verdict(s Signals, noise, confidence float64, c config.Confidence) string {
 	}
 
 	if noise >= noisyThreshold {
-		return VerdictRetire
+		return applyMeasuredOutcomes(VerdictRetire, s)
 	}
 
 	// Concentration and pending churn deliberately do NOT block this arm. A
@@ -194,7 +273,49 @@ func Verdict(s Signals, noise, confidence float64, c config.Confidence) string {
 		return VerdictAutomate
 	}
 
-	return VerdictKeep
+	return applyMeasuredOutcomes(VerdictKeep, s)
+}
+
+// measuredSufficient gates every verdict-level effect of measured pager
+// evidence on both a coverage floor and an absolute sample-size floor --
+// see the doc comments on measuredMinCoverage and measuredMinMatched. A nil
+// PagerOutcomes (no enricher configured, or nothing matched this rule)
+// always fails this and every override below is a no-op.
+func measuredSufficient(p *PagerOutcomes) bool {
+	return p != nil && p.Coverage >= measuredMinCoverage && p.Matched >= measuredMinMatched
+}
+
+// applyMeasuredOutcomes is the one place real pager outcomes are allowed to
+// change a VERDICT (never the noise score itself -- see this file's
+// measured-evidence constants for the reasoning behind each threshold).
+// verdict is whatever the noise-score-driven logic above already decided;
+// this only ever moves it in the two specific, asymmetric directions the
+// evidence justifies:
+//
+//   - consistently acknowledged/escalated pages are direct evidence the
+//     rule is VALUABLE, which argues against deleting it regardless of how
+//     short its episodes measure -- retire is downgraded to tune, not kept
+//     as-is and not dropped to keep;
+//   - a rule that paged repeatedly and was essentially never acknowledged
+//     is direct evidence for exactly what retire claims, stronger than an
+//     inference from duration -- an otherwise-keep verdict is upgraded to
+//     retire, but ONLY keep: a rule already flagged tune or automate has a
+//     different, already-identified problem that non-engagement doesn't
+//     resolve or worsen.
+func applyMeasuredOutcomes(verdict string, s Signals) string {
+	p := s.PagerOutcomes
+	if !measuredSufficient(p) {
+		return verdict
+	}
+
+	switch {
+	case verdict == VerdictRetire && p.engagementRate() >= valuableEngagementThreshold:
+		return VerdictTune
+	case verdict == VerdictKeep && p.Matched >= neverAckedMinMatched && p.engagementRate() <= neverAckedThreshold:
+		return VerdictRetire
+	default:
+		return verdict
+	}
 }
 
 // Evaluate is the one call the rest of the program needs.
