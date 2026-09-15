@@ -26,6 +26,9 @@ type Config struct {
 	FlapWindow Duration   `yaml:"flap_window"`
 	Confidence Confidence `yaml:"confidence"`
 	Coverage   Coverage   `yaml:"coverage"`
+	// Webhook configures `noisefloor collect` only (issue #13); every other
+	// command ignores it.
+	Webhook Webhook `yaml:"webhook"`
 }
 
 // Coverage configures `noisefloor coverage` only; scan and remediate never
@@ -187,6 +190,9 @@ func Default() Config {
 		Coverage: Coverage{
 			ExcludeJobs: []string{"prometheus"},
 		},
+		Webhook: Webhook{
+			MaxBodyBytes: DefaultMaxBodyBytes,
+		},
 	}
 }
 
@@ -254,6 +260,12 @@ func (c Config) Validate() error {
 		if target.File == "" || target.Group == "" {
 			return fmt.Errorf("coverage.rule_targets[%q]: both file and group are required", svc)
 		}
+	}
+	if err := c.Webhook.Auth.Validate(); err != nil {
+		return err
+	}
+	if c.Webhook.MaxBodyBytes <= 0 {
+		return fmt.Errorf("webhook.max_body_bytes must be positive, got %d", c.Webhook.MaxBodyBytes)
 	}
 	return nil
 }
