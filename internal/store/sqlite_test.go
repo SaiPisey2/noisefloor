@@ -405,10 +405,10 @@ func TestInsertEpisodesRejectsOverlappingEpisode(t *testing.T) {
 }
 
 // TestInsertEpisodesKeepsNonOverlappingAndOtherSeries pins the limits of the
-// overlap rule: it must reject re-observations, never real history. A genuine
-// later firing of the same series, an episode that merely abuts the stored
-// one, and a same-instant episode of a different series or state are all real
-// and must survive.
+// reconciliation rule: it must reject re-observations of the same firing,
+// never real history. A genuine later firing well beyond tolerance, and a
+// same-instant episode of a different series or state, are all real and
+// must survive.
 func TestInsertEpisodesKeepsNonOverlappingAndOtherSeries(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
@@ -431,10 +431,8 @@ func TestInsertEpisodesKeepsNonOverlappingAndOtherSeries(t *testing.T) {
 	}
 
 	rest := []Episode{
-		// Abuts the stored episode exactly. Episode ends are exclusive
-		// (lastSample+step), so touching is not overlapping.
-		mk("fp1", StateFiring, start.Add(10*time.Minute), start.Add(15*time.Minute)),
-		// A genuine later re-fire of the same series.
+		// A genuine later re-fire of the same series, well beyond one
+		// step's tolerance of the stored episode's end.
 		mk("fp1", StateFiring, start.Add(30*time.Minute), start.Add(35*time.Minute)),
 		// Same instant, different label set: a different series entirely.
 		mk("fp2", StateFiring, start, start.Add(10*time.Minute)),
@@ -453,6 +451,48 @@ func TestInsertEpisodesKeepsNonOverlappingAndOtherSeries(t *testing.T) {
 	if len(got) != 1+len(rest) {
 		t.Fatalf("got %d episodes, want %d; the overlap rule must reject "+
 			"re-observations of one series, not real history", len(got), 1+len(rest))
+	}
+}
+
+// TestInsertEpisodesReconcilesExactlyAdjacentEpisodes is finding 1 and 5
+// applied to the backfill path's own self-consistency, not just its
+// interaction with the webhook path: two backfill scans over a grid that
+// shifted (an operator-changed prometheus.step, or a window boundary that
+// slid forward) can produce two spans for one firing that touch with zero
+// gap rather than overlap. That must reconcile into one episode, the same
+// as it does for a backfill/webhook pair.
+func TestInsertEpisodesReconcilesExactlyAdjacentEpisodes(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	start := time.Unix(1_700_000_000, 0).UTC()
+
+	id, err := db.UpsertRule(ctx, &Rule{AlertName: "A", GroupName: "g", FirstSeen: start, LastSeen: start, Active: true})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	mk := func(s, e time.Time) Episode {
+		return Episode{
+			RuleID: id, Fingerprint: "fp1", StartedAt: s, EndedAt: e,
+			Resolution: time.Minute, Source: SourceBackfill, State: StateFiring,
+		}
+	}
+
+	first := mk(start, start.Add(10*time.Minute))
+	if err := db.InsertEpisodes(ctx, []Episode{first}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+	// Starts exactly where the first ends -- zero gap.
+	touching := mk(start.Add(10*time.Minute), start.Add(15*time.Minute))
+	if err := db.InsertEpisodes(ctx, []Episode{touching}); err != nil {
+		t.Fatalf("InsertEpisodes touching: %v", err)
+	}
+
+	got, err := db.ListEpisodesInWindow(ctx, start.Add(-time.Hour), start.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListEpisodesInWindow: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d episodes, want 1; zero gap is adjacency, not a separate firing", len(got))
 	}
 }
 

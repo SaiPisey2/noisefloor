@@ -196,24 +196,33 @@ func (s *SQLite) MarkRulesInactive(ctx context.Context, keep []int64) error {
 
 // InsertEpisodes writes episodes, upserting on
 // (rule_id, fingerprint, started_at, state) and DISCARDING any episode that
-// overlaps one already stored for the same series.
+// is already covered by one stored for the same series -- via the SAME
+// reconciliation rule findReconcilableEpisode implements for
+// UpsertWebhookEpisode: an exact match on started_at extends ended_at
+// (never shrinks it); otherwise an existing episode whose span overlaps or
+// is adjacent within the wider of the two episodes' resolution_seconds is
+// treated as the same firing and left untouched; otherwise this is
+// genuinely new and is inserted.
 //
-// The overlap rule is the store's own defence against re-storing the same
-// firing at a shifted timestamp. One series is either firing or it is not, so
-// two overlapping episodes with the same rule, fingerprint and state cannot
-// both be real: an overlap is always the same firing observed twice, and the
-// uniqueness constraint alone cannot see that, because a start that moved by
-// a few seconds is a different key. The collectors keep the sample grid stable
-// so this should not arise (see collect.Backfiller.Run), but the grid depends
-// on prometheus.step, which an operator can change between runs, and on where
-// the window starts, which slides forward every run and re-clips any episode
-// straddling it. Neither is visible from here, and a duplicate that gets in is
-// silently wrong rather than loudly wrong: adjacent duplicates read as
-// re-fires and inflate flap_rate until the verdict flips.
+// The two collection paths used to disagree here: the webhook path already
+// reconciled on overlap-or-adjacent-within-tolerance, while this path
+// rejected only strict overlap. An alert that outlives its first webhook
+// notification -- the ordinary case, not an edge case -- stores
+// [firedAt, notifiedAt] from the webhook and [nextGridPoint, resolvedAt]
+// from the backfill: the two spans rarely overlap, but are always within
+// one query step of each other, which strict overlap alone cannot see.
+// That gap is the same class of imprecision InsertEpisodes' own history
+// already accounts for -- prometheus.step can change between runs, and the
+// window start slides forward and re-clips episodes straddling it -- so
+// the same tolerance applies whether the other observation came from the
+// webhook or from an earlier backfill run.
 //
-// What is already stored wins. A re-observation carries no information the
-// stored row does not already have, and refusing to rewrite history means a
-// rescan can never shorten or move an episode it previously recorded.
+// A duplicate that gets in is silently wrong rather than loudly wrong:
+// adjacent duplicates read as re-fires and inflate flap_rate until the
+// verdict flips. What is already stored wins: a re-observation carries no
+// information the stored row does not already have, and refusing to
+// rewrite a reconciled episode's boundaries means a rescan can never
+// shorten or move an episode it previously recorded.
 func (s *SQLite) InsertEpisodes(ctx context.Context, eps []Episode) error {
 	if len(eps) == 0 {
 		return nil
@@ -224,41 +233,51 @@ func (s *SQLite) InsertEpisodes(ctx context.Context, eps []Episode) error {
 	}
 	defer tx.Rollback()
 
-	// The NOT EXISTS is a half-open overlap test: an existing episode of the
-	// same series whose span intersects this one, excluding the one that
-	// shares this exact start -- that one is this same episode being
-	// re-observed, and belongs on the ON CONFLICT path so a still-running
-	// firing can have its ended_at extended.
-	//
-	// INSERT ... SELECT rather than VALUES because a row can be filtered out;
-	// SQLite needs the WHERE for ON CONFLICT to parse unambiguously after a
-	// SELECT, which this supplies anyway.
-	const q = `
+	const exactQ = `SELECT id, ended_at FROM episodes
+	                WHERE rule_id = ? AND fingerprint = ? AND state = ? AND started_at = ?`
+	const updQ = `UPDATE episodes SET ended_at = ? WHERE id = ?`
+	const insQ = `
 INSERT INTO episodes (rule_id, fingerprint, labels, started_at, ended_at,
                       resolution_seconds, source, state)
-SELECT ?,?,?,?,?,?,?,?
-WHERE NOT EXISTS (
-  SELECT 1 FROM episodes e
-  WHERE e.rule_id = ? AND e.fingerprint = ? AND e.state = ?
-    AND e.started_at <> ?
-    AND e.started_at < ? AND e.ended_at > ?
-)
-ON CONFLICT (rule_id, fingerprint, started_at, state) DO UPDATE SET
-  ended_at = excluded.ended_at`
-	stmt, err := tx.PrepareContext(ctx, q)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close()
+VALUES (?,?,?,?,?,?,?,?)`
 
 	for _, e := range eps {
 		start, end := unix(e.StartedAt), unix(e.EndedAt)
-		if _, err := stmt.ExecContext(ctx,
-			e.RuleID, e.Fingerprint, toJSON(e.Labels), start, end,
-			int64(e.Resolution.Seconds()), e.Source, e.State,
-			e.RuleID, e.Fingerprint, e.State, start, end, start,
-		); err != nil {
-			return fmt.Errorf("insert episode: %w", err)
+		resSec := int64(e.Resolution.Seconds())
+
+		var id, existingEnd int64
+		err := tx.QueryRowContext(ctx, exactQ, e.RuleID, e.Fingerprint, e.State, start).Scan(&id, &existingEnd)
+		switch {
+		case err == nil:
+			// Same start already stored (a rescan re-deriving the same grid
+			// point, most often): extend ended_at, never shrink it.
+			if end > existingEnd {
+				if _, uerr := tx.ExecContext(ctx, updQ, end, id); uerr != nil {
+					return fmt.Errorf("extend episode: %w", uerr)
+				}
+			}
+			continue
+
+		case errors.Is(err, sql.ErrNoRows):
+			// Fall through to the overlap-or-adjacent reconciliation check.
+
+		default:
+			return fmt.Errorf("lookup existing episode: %w", err)
+		}
+
+		_, found, ferr := findReconcilableEpisode(ctx, tx, e, resSec)
+		if ferr != nil {
+			return ferr
+		}
+		if found {
+			// Same firing, already recorded from either collection path.
+			// Its boundaries are left untouched -- see the doc comment above.
+			continue
+		}
+
+		if _, ierr := tx.ExecContext(ctx, insQ, e.RuleID, e.Fingerprint, toJSON(e.Labels),
+			start, end, resSec, e.Source, e.State); ierr != nil {
+			return fmt.Errorf("insert episode: %w", ierr)
 		}
 	}
 	return tx.Commit()
@@ -867,8 +886,8 @@ func findReconcilableEpisode(ctx context.Context, tx *sql.Tx, ep Episode, epResS
 		case start >= newEnd:
 			gap = start - newEnd
 		}
-		if gap > 0 && gap <= tol {
-			return id, true, nil // adjacent, within tolerance
+		if gap >= 0 && gap <= tol {
+			return id, true, nil // adjacent (including touching), within tolerance
 		}
 	}
 	return 0, false, rows.Err()

@@ -33,6 +33,79 @@ func countEpisodesForFingerprint(t *testing.T, db *SQLite, ruleID int64, fp stri
 	return n
 }
 
+// TestBackfillAfterWebhookDoesNotDoubleCount and
+// TestWebhookAfterBackfillDoesNotDoubleCount are finding 1: InsertEpisodes
+// (the backfill path) used to reject only strict overlap, while
+// UpsertWebhookEpisode (the webhook path) already reconciled on
+// overlap-or-adjacent-within-tolerance. An alert firing at 10:00:05 and
+// notified at 10:00:30 stores a webhook episode [10:00:05, 10:00:30]; the
+// backfill later stores [10:01:00, 10:05:00] from the sample grid -- no
+// overlap, but well within one step's tolerance, and the same firing.
+// Both write orders must converge on exactly one stored episode.
+func TestBackfillAfterWebhookDoesNotDoubleCount(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	ruleID := seedWebhookRule(t, db, "Outlives", base)
+
+	webhookEp := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: base.Add(5 * time.Second), EndedAt: base.Add(30 * time.Second),
+		Source: SourceWebhook, State: StateFiring,
+	}
+	if _, reconciled, err := db.UpsertWebhookEpisode(ctx, webhookEp, WebhookMeta{Receiver: "pager"}); err != nil {
+		t.Fatalf("UpsertWebhookEpisode: %v", err)
+	} else if reconciled {
+		t.Fatalf("reconciled = true, want false: nothing stored yet")
+	}
+
+	backfilled := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: base.Add(60 * time.Second), EndedAt: base.Add(5 * time.Minute),
+		Resolution: time.Minute, Source: SourceBackfill, State: StateFiring,
+	}
+	if err := db.InsertEpisodes(ctx, []Episode{backfilled}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	if n := countEpisodesForFingerprint(t, db, ruleID, "fp1"); n != 1 {
+		t.Fatalf("episodes for fp1 = %d, want 1: the backfill's grid-quantized "+
+			"start is within one step of the webhook's notified end, the same firing", n)
+	}
+}
+
+func TestWebhookAfterBackfillDoesNotDoubleCount(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	ruleID := seedWebhookRule(t, db, "OutlivesReverse", base)
+
+	backfilled := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: base.Add(60 * time.Second), EndedAt: base.Add(5 * time.Minute),
+		Resolution: time.Minute, Source: SourceBackfill, State: StateFiring,
+	}
+	if err := db.InsertEpisodes(ctx, []Episode{backfilled}); err != nil {
+		t.Fatalf("InsertEpisodes: %v", err)
+	}
+
+	webhookEp := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: base.Add(5 * time.Second), EndedAt: base.Add(30 * time.Second),
+		Source: SourceWebhook, State: StateFiring,
+	}
+	if _, reconciled, err := db.UpsertWebhookEpisode(ctx, webhookEp, WebhookMeta{Receiver: "pager"}); err != nil {
+		t.Fatalf("UpsertWebhookEpisode: %v", err)
+	} else if !reconciled {
+		t.Errorf("reconciled = false, want true: within tolerance of the backfilled episode")
+	}
+
+	if n := countEpisodesForFingerprint(t, db, ruleID, "fp1"); n != 1 {
+		t.Fatalf("episodes for fp1 = %d, want 1: the webhook's notified end is "+
+			"within one step of the backfill's grid-quantized start, the same firing", n)
+	}
+}
+
 // TestUpsertWebhookEpisodeNoExistingRowInsertsNew covers the "genuinely new"
 // case: no backfilled episode explains this window at all -- a firing
 // invisible to the backfill because it started and resolved inside one
@@ -179,6 +252,48 @@ func TestUpsertWebhookEpisodeAdjacentToBackfillReconciles(t *testing.T) {
 	}
 	if !reconciled {
 		t.Errorf("reconciled = false, want true for an episode adjacent within one step")
+	}
+	if n := countEpisodesForFingerprint(t, db, ruleID, "fp1"); n != 1 {
+		t.Fatalf("episodes for fp1 = %d, want 1", n)
+	}
+}
+
+// TestUpsertWebhookEpisodeExactlyAdjacentReconciles is finding 5: the gap
+// computation in findReconcilableEpisode required gap > 0, excluding the
+// gap == 0 case -- exact adjacency, touching with no gap at all -- which is
+// the definitional case the doc comment claims to cover ("overlapping or
+// adjacent within the wider resolution") and exactly what a webhook
+// startsAt truncated to the second produces when it lands precisely on a
+// backfilled episode's ended_at.
+func TestUpsertWebhookEpisodeExactlyAdjacentReconciles(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	ruleID := seedWebhookRule(t, db, "Touching", now)
+	step := time.Minute
+
+	backfilled := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: now, EndedAt: now.Add(step),
+		Resolution: step, Source: SourceBackfill, State: StateFiring,
+	}
+	if err := db.InsertEpisodes(ctx, []Episode{backfilled}); err != nil {
+		t.Fatalf("seed backfill episode: %v", err)
+	}
+
+	// Starts exactly where the backfilled episode ends -- zero gap, not a
+	// few seconds inside tolerance.
+	webhookEp := Episode{
+		RuleID: ruleID, Fingerprint: "fp1",
+		StartedAt: now.Add(step), EndedAt: now.Add(step + 15*time.Second),
+		Source: SourceWebhook, State: StateFiring,
+	}
+	_, reconciled, err := db.UpsertWebhookEpisode(ctx, webhookEp, WebhookMeta{Receiver: "pager"})
+	if err != nil {
+		t.Fatalf("UpsertWebhookEpisode: %v", err)
+	}
+	if !reconciled {
+		t.Errorf("reconciled = false, want true: zero gap is adjacency, not a separate firing")
 	}
 	if n := countEpisodesForFingerprint(t, db, ruleID, "fp1"); n != 1 {
 		t.Fatalf("episodes for fp1 = %d, want 1", n)
