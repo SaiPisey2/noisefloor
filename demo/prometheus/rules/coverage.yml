@@ -1,0 +1,62 @@
+# Coverage fixtures for issue #10: four synthetic services (see
+# demo/faultgen/coverage.go) with deliberately different alert coverage, so
+# `noisefloor coverage` has something real to find. Their expected coverage
+# outcome is knowable by construction, exactly as the scan archetypes in
+# demo.yml are:
+#
+#   checkout    -- fully covered below: rate (CheckoutNoTraffic), errors
+#                  (CheckoutErrorRateHigh), latency (CheckoutLatencyHigh)
+#                  and saturation (CheckoutMemoryHigh) all alerted on.
+#   billing     -- partially covered: saturation only (BillingMemoryHigh).
+#                  This is deliberately the most common real shape -- a
+#                  team notices resource pressure and alerts on it, and
+#                  never gets round to error rate or latency, even though
+#                  billingMetrics exposes both.
+#   search      -- substantial traffic (the busiest, highest-cardinality
+#                  endpoint in the fixture -- see searchMetrics) and NO
+#                  rule below mentions it at all. The headline blind spot.
+#   batchworker -- no traffic at all (batchworkerMetrics exposes no request
+#                  metric whatsoever) and no alerts either. Coverage must
+#                  not rank this as an urgent blind spot: an idle service
+#                  alerting on nothing is not a risk.
+#
+# checkout and billing are matched by their `service` label (attached via
+# prometheus.yml's static_configs.labels, the way Kubernetes SD would);
+# search and batchworker carry no such label and so have no rule matching
+# them by service or job either -- there being none is the point.
+groups:
+  - name: services
+    interval: 15s
+    rules:
+      - alert: CheckoutErrorRateHigh
+        expr: |
+          sum(rate(http_requests_total{service="checkout",code=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{service="checkout"}[5m])) > 0.05
+        for: 5m
+        labels: {severity: page}
+        annotations: {summary: "checkout error rate above 5%"}
+
+      - alert: CheckoutLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="checkout"}[5m])) by (le)) > 0.5
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "checkout p95 latency above 500ms"}
+
+      - alert: CheckoutMemoryHigh
+        expr: process_resident_memory_bytes{service="checkout"} > 5e8
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "checkout resident memory above 500MB"}
+
+      - alert: CheckoutNoTraffic
+        expr: absent(http_requests_total{service="checkout"})
+        for: 5m
+        labels: {severity: page}
+        annotations: {summary: "checkout has stopped reporting requests entirely"}
+
+      - alert: BillingMemoryHigh
+        expr: process_resident_memory_bytes{service="billing"} > 5e8
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "billing resident memory above 500MB"}

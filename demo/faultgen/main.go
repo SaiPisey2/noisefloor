@@ -216,6 +216,12 @@ func metrics(w http.ResponseWriter, _ *http.Request) {
 
 func main() {
 	http.HandleFunc("/metrics", metrics)
+	// Coverage fixture services (issue #10) -- see coverage.go's doc
+	// comment for what each one is for.
+	http.HandleFunc("/metrics/checkout", checkoutMetrics)
+	http.HandleFunc("/metrics/billing", billingMetrics)
+	http.HandleFunc("/metrics/search", searchMetrics)
+	http.HandleFunc("/metrics/batchworker", batchworkerMetrics)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})

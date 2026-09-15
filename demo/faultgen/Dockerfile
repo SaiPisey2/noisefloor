@@ -1,6 +1,6 @@
 FROM golang:1.27-alpine AS build
 WORKDIR /src
-COPY main.go .
+COPY *.go .
 RUN go mod init faultgen && CGO_ENABLED=0 go build -o /faultgen .
 
 FROM gcr.io/distroless/static-debian12

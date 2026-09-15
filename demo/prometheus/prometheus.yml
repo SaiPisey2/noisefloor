@@ -17,3 +17,29 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: [localhost:9090]
+
+  # Coverage fixture services (issue #10): four synthetic services with
+  # deliberately different alert coverage, all served by faultgen on
+  # distinct metrics paths (see demo/faultgen/coverage.go). checkout and
+  # billing carry namespace/service labels the way Kubernetes service
+  # discovery would attach them, so noisefloor coverage discovers them via
+  # that path; search and batchworker carry neither, so they fall back to
+  # discovery by job alone -- deliberately exercising both paths.
+  - job_name: checkout
+    metrics_path: /metrics/checkout
+    static_configs:
+      - targets: [faultgen:8080]
+        labels: {namespace: shop, service: checkout}
+  - job_name: billing
+    metrics_path: /metrics/billing
+    static_configs:
+      - targets: [faultgen:8080]
+        labels: {namespace: shop, service: billing}
+  - job_name: search
+    metrics_path: /metrics/search
+    static_configs:
+      - targets: [faultgen:8080]
+  - job_name: batchworker
+    metrics_path: /metrics/batchworker
+    static_configs:
+      - targets: [faultgen:8080]
