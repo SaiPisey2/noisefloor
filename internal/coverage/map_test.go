@@ -236,3 +236,56 @@ func TestMapRulesParseError(t *testing.T) {
 		}
 	}
 }
+
+// TestMapRulesAggregatedUnresolvedJobIsNotGlobal is the real-world case the
+// demo fixture could not produce, found running coverage against the public
+// Prometheus demo: the node-exporter and Prometheus mixins.
+//
+// PrometheusErrorSendingAlertsToAnyAlertmanager narrows to `job="prometheus"`
+// and wraps that in `min without (alertmanager) (...)`. Its four siblings
+// carry the same selector with no aggregation and are correctly reported as
+// unattributed when no discovered service has that job. This one was not:
+// spansEveryService consulted `scoped` only on its unaggregated branch, so
+// an aggregation over a rule that names a job turned it into `global` and
+// credited error coverage to every service in the fleet -- six services that
+// have no error alerting whatsoever.
+//
+// Aggregation does not widen a rule. A rule naming a job/namespace/service
+// this package cannot resolve is scoped to something real either way.
+func TestMapRulesAggregatedUnresolvedJobIsNotGlobal(t *testing.T) {
+	rules := []Rule{
+		{GroupName: "prometheus", AlertName: "PrometheusErrorSendingAlertsToAnyAlertmanager",
+			Expr: `min without (alertmanager) (rate(prometheus_notifications_errors_total{alertmanager!~"",job="prometheus"}[5m]) / rate(prometheus_notifications_sent_total{alertmanager!~"",job="prometheus"}[5m])) * 100 > 3`},
+	}
+	grid, _, unattributed := MapRules(rules, testServices())
+	want := "prometheus/PrometheusErrorSendingAlertsToAnyAlertmanager"
+	if len(unattributed) != 1 || unattributed[0] != want {
+		t.Errorf("unattributed = %v, want [%q]: names job=prometheus, which no discovered service has", unattributed, want)
+	}
+	for _, sc := range grid {
+		if sc.AnyCoverage() {
+			t.Errorf("%s: credited with coverage by a rule scoped to job=prometheus", sc.Service.Name)
+		}
+	}
+}
+
+// TestMapRulesAggregatedUnscopedStaysGlobal guards the other side of that
+// fix: a rule carrying only a non-scoping matcher (a status code) really
+// does span every service, and must still read as global. Blocking the
+// global inference on ANY matcher would turn the most common error-rate
+// rule there is into a fleet-wide false blind spot.
+func TestMapRulesAggregatedUnscopedStaysGlobal(t *testing.T) {
+	rules := []Rule{
+		{GroupName: "org", AlertName: "ErrorRateHigh",
+			Expr: `sum by (job) (rate(http_requests_total{code=~"5.."}[5m])) > 10`},
+	}
+	grid, _, unattributed := MapRules(rules, testServices())
+	if len(unattributed) != 0 {
+		t.Errorf("unattributed = %v, want none: the rule spans every job", unattributed)
+	}
+	for _, sc := range grid {
+		if !sc.Covers(SignalErrors) {
+			t.Errorf("%s: expected global error coverage", sc.Service.Name)
+		}
+	}
+}

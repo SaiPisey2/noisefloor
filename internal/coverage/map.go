@@ -134,7 +134,7 @@ func resolveTargets(pe ParsedExpr, services []Service) (names []string, scope st
 	// this package cannot resolve to a discovered service -- must block the
 	// global inference.
 	scoped := hasSvc || hasNS || hasJob || len(pe.Matchers) > 0
-	if !spansEveryService(pe, scoped) {
+	if !spansEveryService(pe, scoped, hasSvc || hasNS || hasJob) {
 		return nil, "matched"
 	}
 	for _, s := range services {
@@ -174,7 +174,7 @@ func resolveTargets(pe ParsedExpr, services []Service) (names []string, scope st
 // truth covers none of them. The honest answer for a matcher this package
 // cannot resolve is the same as for `{service="ghost"}` above: unattributed,
 // not "all of them".
-func spansEveryService(pe ParsedExpr, scoped bool) bool {
+func spansEveryService(pe ParsedExpr, scoped, namesScope bool) bool {
 	if !pe.HasAggregation {
 		return !scoped
 	}
@@ -184,7 +184,17 @@ func spansEveryService(pe ParsedExpr, scoped bool) bool {
 				return false
 			}
 		}
-		return true
+		// `without` only RETAINS the scoping labels, where `by (namespace)`
+		// positively asserts one result per namespace. That difference
+		// matters once a positive matcher has already pinned
+		// job/namespace/service to a value resolving to no discovered
+		// service: nothing fans out, and the rule covers exactly the one
+		// unresolved thing it names. `min without (alertmanager) (
+		// ...{job="prometheus"})` in the Prometheus mixin was read as
+		// cluster-wide on this branch and credited error coverage to every
+		// service in the fleet, while its four unaggregated siblings --
+		// same selector, no wrapper -- were correctly left unattributed.
+		return !namesScope
 	}
 	for _, g := range pe.Grouping {
 		if g == "job" || g == "namespace" || g == "service" {
