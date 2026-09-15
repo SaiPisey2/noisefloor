@@ -96,52 +96,65 @@ func Run(ctx context.Context, provider Provider, evals []scanner.RuleEval, opt R
 		}
 		res.Proposals = append(res.Proposals, proposal)
 
-		existing, err := provider.FindPR(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch)
-		if err != nil {
-			return res, fmt.Errorf("%s/%s: check existing PR: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
+		if err := openProposal(ctx, provider, proposal, opt, &res); err != nil {
+			return res, err
 		}
-		switch {
-		case existing == nil:
-			// No PR has ever been opened for this proposal. Carry on.
-		case existing.State == "open":
-			res.Skipped = append(res.Skipped, Skipped{Proposal: proposal, PR: existing})
-			continue
-		default:
-			// Closed or merged: somebody already decided. See Declined.
-			res.Declined = append(res.Declined, Declined{Proposal: proposal, PR: existing})
-			continue
-		}
-		if !opt.Apply {
-			continue
-		}
-
-		relPath := proposal.File
-		if opt.RepoRoot != "" {
-			if rel, err := filepath.Rel(opt.RepoRoot, proposal.File); err == nil {
-				relPath = rel
-			}
-		}
-
-		if err := provider.EnsureBranch(ctx, opt.Owner, opt.Repo, proposal.Branch, opt.Base); err != nil {
-			return res, fmt.Errorf("%s/%s: ensure branch: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
-		}
-		if err := provider.CommitFiles(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch, []FileChange{
-			{
-				Path: relPath, Content: proposal.NewContent,
-				BaseContent: proposal.BaseContent, Message: proposal.Title,
-			},
-		}); err != nil {
-			return res, fmt.Errorf("%s/%s: commit: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
-		}
-		opened, err := provider.OpenPR(ctx, PRSpec{
-			Owner: opt.Owner, Repo: opt.Repo, Base: opt.Base, Branch: proposal.Branch,
-			Title: proposal.Title, Body: proposal.Body,
-		})
-		if err != nil {
-			return res, fmt.Errorf("%s/%s: open PR: %w", eval.Rule.GroupName, eval.Rule.AlertName, err)
-		}
-		res.Opened = append(res.Opened, Opened{Proposal: proposal, PR: opened})
 	}
 
 	return res, nil
+}
+
+// openProposal is the forge-facing half of Run, factored out so
+// RunStarters (coverage blind-spot proposals) can reuse it exactly rather
+// than re-implementing "check for an existing PR, then branch/commit/open
+// if -apply" a second time. It appends to res (Skipped/Declined/Opened) and
+// returns only on a real error -- a proposal that is skipped or declined is
+// not an error, so callers must not treat a nil return as "opened".
+func openProposal(ctx context.Context, provider Provider, proposal *Proposal, opt RunOptions, res *RunResult) error {
+	existing, err := provider.FindPR(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch)
+	if err != nil {
+		return fmt.Errorf("%s/%s: check existing PR: %w", proposal.Group, proposal.AlertName, err)
+	}
+	switch {
+	case existing == nil:
+		// No PR has ever been opened for this proposal. Carry on.
+	case existing.State == "open":
+		res.Skipped = append(res.Skipped, Skipped{Proposal: proposal, PR: existing})
+		return nil
+	default:
+		// Closed or merged: somebody already decided. See Declined.
+		res.Declined = append(res.Declined, Declined{Proposal: proposal, PR: existing})
+		return nil
+	}
+	if !opt.Apply {
+		return nil
+	}
+
+	relPath := proposal.File
+	if opt.RepoRoot != "" {
+		if rel, err := filepath.Rel(opt.RepoRoot, proposal.File); err == nil {
+			relPath = rel
+		}
+	}
+
+	if err := provider.EnsureBranch(ctx, opt.Owner, opt.Repo, proposal.Branch, opt.Base); err != nil {
+		return fmt.Errorf("%s/%s: ensure branch: %w", proposal.Group, proposal.AlertName, err)
+	}
+	if err := provider.CommitFiles(ctx, opt.Owner, opt.Repo, opt.Base, proposal.Branch, []FileChange{
+		{
+			Path: relPath, Content: proposal.NewContent,
+			BaseContent: proposal.BaseContent, Message: proposal.Title,
+		},
+	}); err != nil {
+		return fmt.Errorf("%s/%s: commit: %w", proposal.Group, proposal.AlertName, err)
+	}
+	opened, err := provider.OpenPR(ctx, PRSpec{
+		Owner: opt.Owner, Repo: opt.Repo, Base: opt.Base, Branch: proposal.Branch,
+		Title: proposal.Title, Body: proposal.Body,
+	})
+	if err != nil {
+		return fmt.Errorf("%s/%s: open PR: %w", proposal.Group, proposal.AlertName, err)
+	}
+	res.Opened = append(res.Opened, Opened{Proposal: proposal, PR: opened})
+	return nil
 }
