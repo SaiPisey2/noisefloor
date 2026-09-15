@@ -137,6 +137,12 @@ func RetireBody(e Evidence) string {
 		fmt.Fprintf(&b, "| pager acknowledged (measured, %s coverage) | %s |\n",
 			formatPercent(e.PagerOutcomes.Coverage), formatPercent(e.PagerOutcomes.AckRate))
 		fmt.Fprintf(&b, "| pager escalated (measured) | %s |\n", formatPercent(e.PagerOutcomes.EscalationRate))
+		// Reported alongside ack/escalation because it is the fact that can
+		// refute a retire proposal reached via the never-acked upgrade (see
+		// internal/score/verdict.go's applyMeasuredOutcomes): a team that
+		// resolves from the push notification without formally acknowledging
+		// the page reads as "never engaged" on the two rows above alone.
+		fmt.Fprintf(&b, "| pager human-resolved (measured) | %s |\n", formatPercent(e.PagerOutcomes.HumanResolvedRate))
 	}
 	fmt.Fprintf(&b, "| confidence | %.2f |\n", e.Confidence)
 	fmt.Fprintf(&b, "| observation window | %s to %s (%s) |\n",

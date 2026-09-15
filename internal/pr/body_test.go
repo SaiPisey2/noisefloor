@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SaiPisey2/noisefloor/internal/score"
 )
 
 func measuredEvidence() Evidence {
@@ -94,5 +96,25 @@ func TestRetireBodyStatesMeasuredSilencesNormally(t *testing.T) {
 	}
 	if strings.Contains(body, "not measured") || strings.Contains(body, "could not be reached") {
 		t.Errorf("body hedges a silenced rate that was actually measured:\n%s", body)
+	}
+}
+
+// TestRetireBodyStatesHumanResolvedRate is finding 2's second half: the
+// keep-to-retire upgrade can be refuted by HumanResolvedRate, so a
+// reviewer of a proposal that upgrade produced must be able to see that
+// number. The body reported coverage, ack and escalation only.
+func TestRetireBodyStatesHumanResolvedRate(t *testing.T) {
+	e := measuredEvidence()
+	e.PagerOutcomes = &score.PagerOutcomes{
+		Source: "pagerduty", Coverage: 1, Matched: 80,
+		AckRate: 0, EscalationRate: 0, HumanResolvedRate: 1,
+	}
+
+	body := RetireBody(e)
+	if !strings.Contains(body, "human resolved") && !strings.Contains(body, "human-resolved") {
+		t.Errorf("body does not report HumanResolvedRate at all:\n%s", body)
+	}
+	if !strings.Contains(body, "100%") {
+		t.Errorf("body does not state the measured 100%% human-resolved rate:\n%s", body)
 	}
 }

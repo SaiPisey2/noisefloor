@@ -147,6 +147,32 @@ func TestNeverAcknowledgedUpgradesKeepToRetire(t *testing.T) {
 	}
 }
 
+// TestHumanResolvedBlocksNeverAckedUpgrade is finding 2: engagementRate is
+// max(AckRate, EscalationRate) and never looks at HumanResolvedRate, so a
+// team that resolves from the push notification without formally
+// acknowledging the page reads as "never engaged" and gets its rule
+// upgraded to retire on eighty pages a human personally closed. The
+// upgrade must not fire while HumanResolvedRate contradicts it.
+func TestHumanResolvedBlocksNeverAckedUpgrade(t *testing.T) {
+	s := confident(Signals{}) // clean on every duration-derived signal -> keep
+	c := defaultConfidence()
+	noise := NoiseScore(s, defaultWeights())
+	conf := Confidence(s, 30*24*time.Hour, c)
+	if got := Verdict(s, noise, conf, c); got != VerdictKeep {
+		t.Fatalf("precondition: base verdict = %s, want keep", got)
+	}
+
+	s.PagerOutcomes = &PagerOutcomes{
+		Source: "pagerduty", Coverage: 1, Matched: 80,
+		AckRate: 0, EscalationRate: 0, HumanResolvedRate: 1,
+	}
+	conf = Confidence(s, 30*24*time.Hour, c)
+	if got := Verdict(s, noise, conf, c); got != VerdictKeep {
+		t.Errorf("verdict with HumanResolvedRate 1.0 = %s, want keep unchanged "+
+			"(a human personally closed every one of these pages)", got)
+	}
+}
+
 // TestNeverAcknowledgedRequiresLargeSample guards the higher evidentiary
 // bar this arm is held to: it makes a stronger claim than the coverage
 // floor alone, so it needs neverAckedMinMatched, not just

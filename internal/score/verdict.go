@@ -297,11 +297,25 @@ func measuredSufficient(p *PagerOutcomes) bool {
 //     short its episodes measure -- retire is downgraded to tune, not kept
 //     as-is and not dropped to keep;
 //   - a rule that paged repeatedly and was essentially never acknowledged
-//     is direct evidence for exactly what retire claims, stronger than an
-//     inference from duration -- an otherwise-keep verdict is upgraded to
-//     retire, but ONLY keep: a rule already flagged tune or automate has a
-//     different, already-identified problem that non-engagement doesn't
-//     resolve or worsen.
+//     OR escalated OR resolved by a human is direct evidence for exactly
+//     what retire claims, stronger than an inference from duration -- an
+//     otherwise-keep verdict is upgraded to retire, but ONLY keep: a rule
+//     already flagged tune or automate has a different, already-identified
+//     problem that non-engagement doesn't resolve or worsen.
+//
+//     HumanResolvedRate is checked here alongside engagementRate,
+//     specifically for this upgrade, rather than folded into
+//     engagementRate itself: engagementRate's own exclusion of
+//     AutoResolvedRate stays correct (an auto-resolve says nothing about
+//     whether a human looked), and that reasoning does not transfer to
+//     HumanResolvedRate, which IS direct evidence a human was involved.
+//     This is the only override that can cause a loss of coverage, so it
+//     must not fire while a signal that refutes it -- a team that resolves
+//     from the push notification without formally acknowledging the page --
+//     sits unused. See internal/pr/body.go's RetireBody, which reports
+//     HumanResolvedRate alongside AckRate/EscalationRate for exactly this
+//     reason: a reviewer of a retire proposal from this arm must be able to
+//     see the fact that would refute it.
 func applyMeasuredOutcomes(verdict string, s Signals) string {
 	p := s.PagerOutcomes
 	if !measuredSufficient(p) {
@@ -311,7 +325,8 @@ func applyMeasuredOutcomes(verdict string, s Signals) string {
 	switch {
 	case verdict == VerdictRetire && p.engagementRate() >= valuableEngagementThreshold:
 		return VerdictTune
-	case verdict == VerdictKeep && p.Matched >= neverAckedMinMatched && p.engagementRate() <= neverAckedThreshold:
+	case verdict == VerdictKeep && p.Matched >= neverAckedMinMatched &&
+		p.engagementRate() <= neverAckedThreshold && p.HumanResolvedRate <= neverAckedThreshold:
 		return VerdictRetire
 	default:
 		return verdict
