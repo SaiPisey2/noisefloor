@@ -43,7 +43,16 @@ type Edit struct {
 	ReplaceWith string // full replacement line, no trailing newline
 
 	InsertAfter int    // 1-indexed, or 0 for "before the first line"
-	InsertWith  string // full new line, no trailing newline
+	InsertWith  string // full new line, no trailing newline -- single-line insert (a tune's for:)
+
+	// InsertLines is the multi-line form of InsertWith: a whole block of new
+	// lines (a starter rule's `- alert: ... / expr: ... / for: ...`),
+	// inserted as a unit immediately after InsertAfter. Exactly one of
+	// InsertWith and InsertLines is set on an insert Edit; each line is
+	// already fully indented and contains no embedded newline of its own,
+	// so the diff can show one "+" per line the way a human reviewer
+	// expects, rather than one "+" in front of an opaque multi-line blob.
+	InsertLines []string
 
 	// hasInsert distinguishes "insert before line 1" (InsertAfter == 0,
 	// deliberately) from "no insert configured" (also InsertAfter == 0, by
@@ -57,6 +66,24 @@ type Edit struct {
 // afterLine (0 for the top of the file).
 func NewInsert(file string, afterLine int, newLine string) Edit {
 	return Edit{File: file, InsertAfter: afterLine, InsertWith: newLine, hasInsert: true}
+}
+
+// NewInsertBlock builds an Edit that inserts several new lines, as a unit,
+// immediately after line afterLine (0 for the top of the file). Used by a
+// starter proposal (internal/pr's coverage-blind-spot templates) to add a
+// whole new rule -- alert/expr/for/labels/annotations -- to an existing
+// group's rules: list in one edit.
+func NewInsertBlock(file string, afterLine int, lines []string) Edit {
+	return Edit{File: file, InsertAfter: afterLine, InsertLines: lines, hasInsert: true}
+}
+
+// lines returns this Edit's insert content as a slice, whichever of
+// InsertWith/InsertLines was set.
+func (e Edit) lines() []string {
+	if len(e.InsertLines) > 0 {
+		return e.InsertLines
+	}
+	return []string{e.InsertWith}
 }
 
 // Apply reads e.File, applies the edit, and returns the file's content as
@@ -91,7 +118,11 @@ func (e Edit) Apply() (oldContent, newContent, diff string, err error) {
 		e.ReplaceWith = matchEOL(e.ReplaceWith, crlf)
 		out, diff, err = e.applyReplace(lines, trailingNewline)
 	case e.hasInsert:
-		e.InsertWith = matchEOL(e.InsertWith, crlf)
+		inserted := e.lines()
+		for i, l := range inserted {
+			inserted[i] = matchEOL(l, crlf)
+		}
+		e.InsertLines = inserted
 		out, diff, err = e.applyInsert(lines, trailingNewline)
 	default:
 		err = fmt.Errorf("edit for %s specifies no change", e.File)
@@ -202,31 +233,38 @@ func (e Edit) applyInsert(lines []string, trailingNewline bool) (string, string,
 	if e.InsertAfter > len(lines) {
 		return "", "", fmt.Errorf("%s: insert-after line %d exceeds the file's %d lines", e.File, e.InsertAfter, len(lines))
 	}
+	newLines := e.InsertLines
 
 	var out []string
 	out = append(out, lines[:e.InsertAfter]...)
-	out = append(out, e.InsertWith)
+	out = append(out, newLines...)
 	out = append(out, lines[e.InsertAfter:]...)
 
 	lo := clampLo(e.InsertAfter - diffContext + 1)
 	hi := clampHi(e.InsertAfter+diffContext, len(lines))
 	oldCount := hi - lo + 1
-	newCount := oldCount + 1
+	newCount := oldCount + len(newLines)
 
-	var body strings.Builder
-	for ln := lo; ln <= hi; ln++ {
-		fmt.Fprintf(&body, " %s\n", lines[ln-1])
-		if ln == e.InsertAfter {
-			fmt.Fprintf(&body, "+%s\n", e.InsertWith)
+	insertedBlock := func(b *strings.Builder) {
+		for _, l := range newLines {
+			fmt.Fprintf(b, "+%s\n", l)
 		}
 	}
+
+	var body strings.Builder
 	if e.InsertAfter == 0 {
-		// Inserting before line 1: the body loop above never visits ln==0,
-		// so the "+" line has to be emitted up front instead.
-		body.Reset()
-		fmt.Fprintf(&body, "+%s\n", e.InsertWith)
+		// Inserting before line 1: the loop below never visits ln==0, so the
+		// "+" lines have to be emitted up front instead.
+		insertedBlock(&body)
 		for ln := lo; ln <= hi; ln++ {
 			fmt.Fprintf(&body, " %s\n", lines[ln-1])
+		}
+	} else {
+		for ln := lo; ln <= hi; ln++ {
+			fmt.Fprintf(&body, " %s\n", lines[ln-1])
+			if ln == e.InsertAfter {
+				insertedBlock(&body)
+			}
 		}
 	}
 
