@@ -74,6 +74,20 @@ type Result struct {
 	// integration never paged for, or paged for outside this source's
 	// retention, legitimately has nothing to report.
 	Matched []EpisodeOutcome
+
+	// EscalationAvailable is false when this source could not fetch
+	// escalation data at all for the window (a best-effort sweep that
+	// failed or was capped before finishing), as opposed to fetching it
+	// and finding no escalations. Every EpisodeOutcome.Escalated in
+	// Matched then reads false regardless of the true value -- a
+	// conservative degradation for most scoring, but not for every one
+	// (see internal/score's PagerOutcomes and applyMeasuredOutcomes),
+	// so callers that gate a decision on "essentially never escalated"
+	// need to tell the two cases apart. Default false: an enricher that
+	// never sets this is read as never having escalation data, which is
+	// the safe assumption for one that does not implement escalation
+	// detection at all.
+	EscalationAvailable bool
 }
 
 // Enricher fetches real pager outcomes for one rule's episodes, from one

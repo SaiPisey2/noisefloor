@@ -140,6 +140,7 @@ func TestNeverAcknowledgedUpgradesKeepToRetire(t *testing.T) {
 
 	s.PagerOutcomes = &PagerOutcomes{
 		Source: "pagerduty", Coverage: 1, Matched: 400, AckRate: 0, EscalationRate: 0,
+		EscalationAvailable: true,
 	}
 	conf = Confidence(s, 30*24*time.Hour, c)
 	if got := Verdict(s, noise, conf, c); got != VerdictRetire {
@@ -170,6 +171,35 @@ func TestHumanResolvedBlocksNeverAckedUpgrade(t *testing.T) {
 	if got := Verdict(s, noise, conf, c); got != VerdictKeep {
 		t.Errorf("verdict with HumanResolvedRate 1.0 = %s, want keep unchanged "+
 			"(a human personally closed every one of these pages)", got)
+	}
+}
+
+// TestEscalationUnavailableBlocksNeverAckedUpgrade is finding 3: when the
+// escalation sweep fails, EscalationRate reads 0 -- not because nobody
+// escalated, but because that data could not be fetched at all (see
+// enrich.Result.EscalationAvailable and pagerduty's windowData.escalated).
+// A rule whose real EscalationRate is 0.9 degrades to EscalationRate 0 on
+// a failed sweep and, with AckRate also 0, would otherwise clear the
+// never-acked upgrade's threshold and get proposed for deletion -- exactly
+// inverted from a rule that was actually never engaged. The upgrade must
+// not fire while escalation data is unavailable.
+func TestEscalationUnavailableBlocksNeverAckedUpgrade(t *testing.T) {
+	s := confident(Signals{}) // clean on every duration-derived signal -> keep
+	c := defaultConfidence()
+	noise := NoiseScore(s, defaultWeights())
+	conf := Confidence(s, 30*24*time.Hour, c)
+	if got := Verdict(s, noise, conf, c); got != VerdictKeep {
+		t.Fatalf("precondition: base verdict = %s, want keep", got)
+	}
+
+	s.PagerOutcomes = &PagerOutcomes{
+		Source: "pagerduty", Coverage: 1, Matched: 400,
+		AckRate: 0, EscalationRate: 0, EscalationAvailable: false,
+	}
+	conf = Confidence(s, 30*24*time.Hour, c)
+	if got := Verdict(s, noise, conf, c); got != VerdictKeep {
+		t.Errorf("verdict with unavailable escalation data = %s, want keep unchanged "+
+			"(EscalationRate 0 here is unmeasured, not evidence of anything)", got)
 	}
 }
 

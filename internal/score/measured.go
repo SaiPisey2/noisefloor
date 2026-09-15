@@ -38,6 +38,17 @@ type PagerOutcomes struct {
 	// auto-resolve says nothing about whether a human ever looked.
 	HumanResolvedRate float64
 	AutoResolvedRate  float64
+
+	// EscalationAvailable is false when the source could not fetch
+	// escalation data at all for this window (e.g. PagerDuty's log-entry
+	// sweep failed or was capped before finishing -- see
+	// pagerduty.windowData.escalated). EscalationRate then reads 0 -- not
+	// because nothing escalated, but because nobody could tell. Mirrors
+	// internal/pr.Evidence.SilencesAvailable: asserting a rate from a
+	// failed fetch presents an unmeasured number as a measured one, and
+	// the two cases must stay distinguishable to a caller that gates a
+	// verdict change on the rate reading low.
+	EscalationAvailable bool
 }
 
 // engagementRate is the strongest single number PagerOutcomes offers for
@@ -97,5 +108,6 @@ func AggregateOutcomes(res enrich.Result, firingEpisodes int) *PagerOutcomes {
 		Source: res.Source, Coverage: coverage, Matched: len(res.Matched),
 		AckRate: acked / n, EscalationRate: escalated / n,
 		HumanResolvedRate: human / n, AutoResolvedRate: auto / n,
+		EscalationAvailable: res.EscalationAvailable,
 	}
 }

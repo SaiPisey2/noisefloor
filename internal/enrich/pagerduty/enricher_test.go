@@ -95,6 +95,39 @@ func TestEnrichDegradesWhenEscalationSweepFails(t *testing.T) {
 	if res.Matched[0].Escalated {
 		t.Error("escalation sweep failed -- Escalated must read false, not fabricate a value")
 	}
+	if res.EscalationAvailable {
+		t.Error("EscalationAvailable = true, want false: the sweep failed and this " +
+			"result's escalation data cannot be trusted as a measured zero (finding 3)")
+	}
+}
+
+// TestEnrichReportsEscalationAvailableOnSuccess is the control for the
+// test above: when the sweep succeeds, EscalationAvailable must be true
+// even though nothing in the payload escalated, so a caller can tell "no
+// escalations" apart from "escalation data unavailable".
+func TestEnrichReportsEscalationAvailableOnSuccess(t *testing.T) {
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/incidents":
+			w.Write([]byte(`{"limit":100,"offset":0,"more":false,"incidents":[{"id":"P1","title":"Flaky is firing","created_at":"` +
+				base.Format(time.RFC3339) + `"}]}`))
+		case "/log_entries":
+			w.Write([]byte(`{"limit":100,"offset":0,"more":false,"log_entries":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	e := testEnricher(t, srv)
+	episodes := []store.Episode{mkEpisode("fp1", base, time.Minute)}
+	res, err := e.Enrich(context.Background(), store.Rule{AlertName: "Flaky"}, episodes, testWindow.since, testWindow.until)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !res.EscalationAvailable {
+		t.Error("EscalationAvailable = false, want true: the sweep succeeded")
+	}
 }
 
 // TestEnrichSurfacesIncidentsFetchFailure guards the other side: a failed

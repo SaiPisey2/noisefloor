@@ -316,6 +316,18 @@ func measuredSufficient(p *PagerOutcomes) bool {
 //     HumanResolvedRate alongside AckRate/EscalationRate for exactly this
 //     reason: a reviewer of a retire proposal from this arm must be able to
 //     see the fact that would refute it.
+//
+//     The upgrade also requires p.EscalationAvailable. When the source
+//     could not fetch escalation data at all, EscalationRate reads 0 not
+//     because nobody escalated but because nobody could tell -- and this
+//     upgrade is the one place that degradation is dangerous rather than
+//     conservative: a rule with a genuinely high EscalationRate looks
+//     identical to a never-engaged one the moment the sweep fails, and
+//     would otherwise flip from keep straight to retire on a fetch error.
+//     AckRate carries no such caveat (it never depends on the sweep), so
+//     this does not gate the retire-to-tune downgrade above, where a
+//     fabricated-low EscalationRate can only fail to downgrade -- the
+//     conservative direction.
 func applyMeasuredOutcomes(verdict string, s Signals) string {
 	p := s.PagerOutcomes
 	if !measuredSufficient(p) {
@@ -325,7 +337,7 @@ func applyMeasuredOutcomes(verdict string, s Signals) string {
 	switch {
 	case verdict == VerdictRetire && p.engagementRate() >= valuableEngagementThreshold:
 		return VerdictTune
-	case verdict == VerdictKeep && p.Matched >= neverAckedMinMatched &&
+	case verdict == VerdictKeep && p.Matched >= neverAckedMinMatched && p.EscalationAvailable &&
 		p.engagementRate() <= neverAckedThreshold && p.HumanResolvedRate <= neverAckedThreshold:
 		return VerdictRetire
 	default:

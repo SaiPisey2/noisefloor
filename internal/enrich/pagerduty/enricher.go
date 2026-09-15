@@ -77,7 +77,10 @@ func (e *Enricher) Enrich(ctx context.Context, rule store.Rule, episodes []store
 	}
 
 	matched := matchIncidents(rule.AlertName, firing, data.incidents, data.escalated, e.matchWindow)
-	return enrich.Result{Source: "pagerduty", Matched: matched}, nil
+	return enrich.Result{
+		Source: "pagerduty", Matched: matched,
+		EscalationAvailable: data.escalated != nil,
+	}, nil
 }
 
 func (e *Enricher) fetchWindow(ctx context.Context, since, until time.Time) (windowData, error) {
