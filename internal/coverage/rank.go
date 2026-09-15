@@ -2,7 +2,7 @@ package coverage
 
 import "sort"
 
-// BlindSpot is one service with no alert coverage at all, ranked for
+// BlindSpot is one service that no rule names specifically, ranked for
 // display.
 type BlindSpot struct {
 	Service Service
@@ -32,28 +32,49 @@ type BlindSpot struct {
 // service) can occur within a single basis too.
 const idleFraction = 0.05
 
-// sampleIdleFloor is an absolute floor applied only within the BasisSamples
+// sampleIdleFloor is an absolute floor applied within the BasisSamples
 // group, in addition to idleFraction's relative check: a target exposing
 // this few series or fewer is emitting essentially nothing beyond a bare
 // liveness heartbeat, whatever that compares to among its peers.
 //
-// BasisRequests needs no such floor -- a measured requests/second figure is
-// already an absolute, meaningful rate on its own (a fraction of a request
-// per second is negligible regardless of what else was discovered). A bare
-// sample count is not: it measures how much a target has to say for
-// itself, and the honest range that spans is small enough (single digits
-// to a few hundred) that a purely relative comparison between two already-
-// tiny numbers can fail to trigger even when both are, in an absolute
-// sense, negligible. Verified against the live demo: a batch worker
-// exposing one gauge (1 sample) sits within the same order of magnitude as
-// a lightly-instrumented sibling exposing a handful of gauges (8 samples),
+// A bare sample count measures how much a target has to say for itself,
+// and the honest range that spans is small enough (single digits to a few
+// hundred) that a purely relative comparison between two already-tiny
+// numbers can fail to trigger even when both are, in an absolute sense,
+// negligible. Verified against the live demo: a batch worker exposing one
+// gauge (1 sample) sits within the same order of magnitude as a
+// lightly-instrumented sibling exposing a handful of gauges (8 samples),
 // so 5% of their median alone never flagged it -- this floor does.
 const sampleIdleFloor = 2
 
-// RankBlindSpots returns every service with no alert coverage at all
-// (ServiceCoverage.AnyCoverage() == false), ranked so a service carrying
-// real load with zero alerting sorts near the top -- the headline case
-// this package exists to surface.
+// requestIdleFloor is the same absolute floor for the BasisRequests group,
+// in requests per second.
+//
+// An earlier version of this file asserted that a measured req/s figure
+// "needs no such floor" because it is already an absolute, meaningful rate.
+// It never implemented one, and the relative test alone cannot stand in for
+// it, for a reason that has nothing to do with the unit: a median is a
+// comparison against peers, and it degenerates whenever the peers do not
+// vary. With exactly ONE blind spot the median IS that service's own
+// traffic, so the test reads "is x <= 0.05x" and no single blind spot is
+// ever idle. With every blind spot at the same value -- a dev cluster
+// ticking over at half a request per second each -- the median is again
+// that value and nothing is idle, so every service in it earns a
+// page-severity starter proposal on day one.
+//
+// One request per second is the line: below it, the five-minute windows a
+// starter rule evaluates over hold a few hundred requests at most, so a
+// single failed request moves an error ratio by a whole percentage point.
+// That is the regime where a brand-new, page-severity rule measures noise
+// rather than load, which is exactly what Idle exists to keep it away from.
+const requestIdleFloor = 1.0
+
+// RankBlindSpots returns every service that no rule names specifically
+// (ServiceCoverage.AnyScopedCoverage() == false), ranked so a service
+// carrying real load with zero alerting of its own sorts near the top --
+// the headline case this package exists to surface. See
+// AnyScopedCoverage for why a global-scope match does not clear a service
+// off this list even though the grid credits it.
 //
 // Traffic is ranked WITHIN one basis at a time, never across bases: a
 // service measured in requests/second and one measured in scrape-sample
@@ -78,7 +99,7 @@ const sampleIdleFloor = 2
 func RankBlindSpots(grid []ServiceCoverage) []BlindSpot {
 	byBasis := map[string][]ServiceCoverage{}
 	for _, sc := range grid {
-		if sc.AnyCoverage() {
+		if sc.AnyScopedCoverage() {
 			continue
 		}
 		byBasis[sc.Service.TrafficBasis] = append(byBasis[sc.Service.TrafficBasis], sc)
@@ -113,9 +134,10 @@ func basisOrder(present map[string][]ServiceCoverage) []string {
 }
 
 // rankWithinBasis ranks one basis group by traffic descending, appending
-// idle services (see idleFraction, computed against this group's own
-// median, plus sampleIdleFloor for a BasisSamples group) after every
-// non-idle one in the group.
+// idle services after every non-idle one in the group. A service is idle
+// when it is negligible relative to this group's own median (idleFraction)
+// or below the group's absolute floor (absoluteIdleFloor) -- either test
+// alone leaves a hole the other covers.
 func rankWithinBasis(basis string, group []ServiceCoverage) []BlindSpot {
 	traffic := make([]float64, len(group))
 	for i, sc := range group {
@@ -125,11 +147,10 @@ func rankWithinBasis(basis string, group []ServiceCoverage) []BlindSpot {
 
 	var active, idle []BlindSpot
 	for _, sc := range group {
-		isIdle := sc.Service.Traffic <= threshold
-		if basis == BasisSamples && sc.Service.Traffic <= sampleIdleFloor {
-			isIdle = true
+		bs := BlindSpot{
+			Service: sc.Service,
+			Idle:    sc.Service.Traffic <= threshold || sc.Service.Traffic <= absoluteIdleFloor(basis),
 		}
-		bs := BlindSpot{Service: sc.Service, Idle: isIdle}
 		if bs.Idle {
 			idle = append(idle, bs)
 		} else {
@@ -146,6 +167,22 @@ func rankWithinBasis(basis string, group []ServiceCoverage) []BlindSpot {
 	sort.SliceStable(idle, func(i, j int) bool { return idle[i].Service.Name < idle[j].Service.Name })
 
 	return append(active, idle...)
+}
+
+// absoluteIdleFloor is the traffic value at or below which a service is
+// idle outright, whatever its peers read -- the check idleFraction's median
+// cannot make (see requestIdleFloor). A basis with no absolute meaning
+// (the empty basis: no traffic data was available at all) gets no floor,
+// since there is no measurement to compare against one.
+func absoluteIdleFloor(basis string) float64 {
+	switch basis {
+	case BasisRequests:
+		return requestIdleFloor
+	case BasisSamples:
+		return sampleIdleFloor
+	default:
+		return -1 // below any traffic value, including zero: never triggers
+	}
 }
 
 // median returns the middle value of vs (averaging the two middle values

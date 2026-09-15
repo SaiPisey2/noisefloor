@@ -148,11 +148,36 @@ func (sc ServiceCoverage) Covers(sig Signal) bool {
 }
 
 // AnyCoverage reports whether this service has any alert coverage at all,
-// on any signal.
+// on any signal, counting a global-scope match the same as an explicit one.
+// This is what the grid renders.
 func (sc ServiceCoverage) AnyCoverage() bool {
 	for _, sig := range Signals {
 		if sc.Covers(sig) {
 			return true
+		}
+	}
+	return false
+}
+
+// AnyScopedCoverage reports whether any rule names this service
+// specifically (RuleMatch.Scope "matched"), as opposed to sweeping it up
+// with every other service in the cluster.
+//
+// This, not AnyCoverage, is what blind-spot ranking asks (see
+// RankBlindSpots). A cluster-wide `up == 0` is real alerting and the grid
+// says so, but it is one rule that fires identically for every target
+// noisefloor discovered; it tells a team nothing about whether anyone is
+// watching THEIR service. Letting it satisfy "has alerting" would mean a
+// single global rule anywhere in a Prometheus emptied the blind-spot list
+// for the entire estate -- turning the one honest fix for global
+// attribution (see resolveTargets) into a way to hide every gap it exists
+// to surface.
+func (sc ServiceCoverage) AnyScopedCoverage() bool {
+	for _, sig := range Signals {
+		for _, m := range sc.Covered[sig] {
+			if m.Scope == "matched" {
+				return true
+			}
 		}
 	}
 	return false
