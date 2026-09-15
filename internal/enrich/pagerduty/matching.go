@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/SaiPisey2/noisefloor/internal/enrich"
 	"github.com/SaiPisey2/noisefloor/internal/store"
@@ -21,9 +23,15 @@ import (
 // available. Matching is therefore:
 //
 //  1. Candidate incidents are those whose title or incident_key contains
-//     the rule's alert name (case-insensitive) -- true for PagerDuty
-//     integrations built from Alertmanager's default templates, which
-//     include {{ .CommonLabels.alertname }} in both.
+//     the rule's alert name (case-insensitive) at a delimiter-bounded
+//     position -- true for PagerDuty integrations built from
+//     Alertmanager's default templates, which include
+//     {{ .CommonLabels.alertname }} in both. Delimiter-bounded, not a
+//     plain substring test, because alert names routinely share a prefix
+//     with a sibling's: DiskFull is a substring of DiskFullCritical,
+//     HighLatency of HighLatencyP99, and every member of the
+//     KubePodCrashLooping family absorbs its siblings under a plain
+//     Contains. See wordBoundaryContains.
 //  2. Among candidates, each episode is paired with the nearest
 //     unmatched candidate whose created_at falls within
 //     [episode.StartedAt - window, episode.EndedAt + window].
@@ -89,8 +97,8 @@ func filterByAlertName(alertName string, incidents []incident) []candidate {
 	}
 	var out []candidate
 	for _, inc := range incidents {
-		if !strings.Contains(strings.ToLower(inc.Title), needle) &&
-			!strings.Contains(strings.ToLower(inc.IncidentKey), needle) {
+		if !wordBoundaryContains(strings.ToLower(inc.Title), needle) &&
+			!wordBoundaryContains(strings.ToLower(inc.IncidentKey), needle) {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339, inc.CreatedAt)
@@ -100,6 +108,54 @@ func filterByAlertName(alertName string, incidents []incident) []candidate {
 		out = append(out, candidate{incident: inc, createdAt: t})
 	}
 	return out
+}
+
+// wordBoundaryContains reports whether needle occurs in haystack at a
+// delimiter-bounded position: the runes immediately before and after the
+// match, if any, must not themselves be letters or digits. Both arguments
+// are expected already lower-cased by the caller.
+//
+// A plain strings.Contains cross-attributes pages one way, short rule
+// names absorbing longer ones that merely share a prefix -- DiskFull
+// inside DiskFullCritical, HighLatency inside HighLatencyP99. Requiring a
+// boundary on both sides rejects those while still matching the ordinary
+// case, where the alert name is set off by spaces, brackets, underscores,
+// or sits at the start or end of the string entirely (string edges count
+// as boundaries, which is why they need no rune to compare against).
+func wordBoundaryContains(haystack, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for offset := 0; offset < len(haystack); {
+		idx := strings.Index(haystack[offset:], needle)
+		if idx == -1 {
+			return false
+		}
+		idx += offset
+		end := idx + len(needle)
+
+		beforeOK := idx == 0 || !isWordRune(lastRune(haystack[:idx]))
+		afterOK := end == len(haystack) || !isWordRune(firstRune(haystack[end:]))
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = idx + 1
+	}
+	return false
+}
+
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func firstRune(s string) rune {
+	r, _ := utf8.DecodeRuneInString(s)
+	return r
+}
+
+func lastRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
 }
 
 func closer(a, b, to time.Time) bool {

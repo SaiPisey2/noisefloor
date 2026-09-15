@@ -55,6 +55,48 @@ func TestMatchIncidentsFiltersByAlertName(t *testing.T) {
 	}
 }
 
+// TestMatchIncidentsRequiresWordBoundary is finding 4: strings.Contains
+// cross-attributes pages whose title or incident_key merely embeds this
+// rule's name inside a longer identifier with no delimiter between them --
+// DiskFull inside DiskFullCritical, HighLatency inside HighLatencyP99. The
+// shorter rule must not absorb the longer one's incidents.
+func TestMatchIncidentsRequiresWordBoundary(t *testing.T) {
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	episodes := []store.Episode{mkEpisode("fp1", base, time.Minute)}
+	incidents := []incident{
+		mkIncident("P1", "[FIRING] DiskFullCritical on db-1", base.Format(time.RFC3339)),
+	}
+	got := matchIncidents("DiskFull", episodes, incidents, nil, 5*time.Minute)
+	if len(got) != 0 {
+		t.Errorf("matched %d, want 0: DiskFullCritical is a different alert than DiskFull, "+
+			"not the same one with a suffix", len(got))
+	}
+}
+
+// TestMatchIncidentsWordBoundaryAllowsRealDelimiters is the control for
+// the test above: a rule name set off by ordinary punctuation, brackets,
+// or an underscore must still match -- only the no-delimiter absorption
+// case is rejected.
+func TestMatchIncidentsWordBoundaryAllowsRealDelimiters(t *testing.T) {
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	episodes := []store.Episode{mkEpisode("fp1", base, time.Minute)}
+	incidents := []incident{
+		mkIncident("P1", "[FIRING] DiskFull on db-1", base.Format(time.RFC3339)),
+	}
+	got := matchIncidents("DiskFull", episodes, incidents, nil, 5*time.Minute)
+	if len(got) != 1 {
+		t.Errorf("matched %d, want 1: DiskFull is delimiter-bounded by brackets and spaces", len(got))
+	}
+
+	incidentKey := []incident{
+		{ID: "P2", Title: "unrelated title", IncidentKey: "DiskFull_db-1_1700000000", CreatedAt: base.Format(time.RFC3339)},
+	}
+	got = matchIncidents("DiskFull", []store.Episode{mkEpisode("fp2", base, time.Minute)}, incidentKey, nil, 5*time.Minute)
+	if len(got) != 1 {
+		t.Errorf("matched %d, want 1: DiskFull is delimiter-bounded by an underscore in incident_key", len(got))
+	}
+}
+
 // TestMatchIncidentsRespectsWindow guards the time-proximity bound: an
 // incident that matches by name but falls outside the configured match
 // window must not be matched.
