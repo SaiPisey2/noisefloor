@@ -155,6 +155,31 @@ func TestMapRulesFallsThroughAnUnresolvableScope(t *testing.T) {
 	}
 }
 
+// TestMapRulesScopedByUnrecognisedLabelIsNotGlobal is N3: a rule narrowed
+// by a label this package does not treat as scoping (mountpoint, instance,
+// ...) is scoped to SOMETHING, even though MapRules cannot say what -- it
+// must not be credited as `global` coverage for every discovered service.
+// Before this fix, spansEveryService's "scoped" test only looked at
+// job/namespace/service matchers, so this exact rule -- unaggregated and
+// narrowed only by mountpoint/instance -- fell through as "not scoped" and
+// was attributed to every service with Scope "global", manufacturing
+// saturation coverage for services it says nothing about.
+func TestMapRulesScopedByUnrecognisedLabelIsNotGlobal(t *testing.T) {
+	rules := []Rule{
+		{GroupName: "org", AlertName: "NodeDiskFull",
+			Expr: `node_filesystem_avail_bytes{mountpoint="/",instance="node1"} < 1e9`},
+	}
+	grid, _, unattributed := MapRules(rules, testServices())
+	if len(unattributed) != 1 || unattributed[0] != "org/NodeDiskFull" {
+		t.Errorf("unattributed = %v, want [\"org/NodeDiskFull\"]: scoped to an unresolved instance/mountpoint, not global", unattributed)
+	}
+	for _, sc := range grid {
+		if sc.AnyCoverage() {
+			t.Errorf("%s: unexpected saturation coverage from a rule scoped to a specific mountpoint/instance", sc.Service.Name)
+		}
+	}
+}
+
 // TestMapRulesResolvesRegexpScopes: a regexp matcher that genuinely names
 // discovered services must resolve to exactly those, with Scope "matched"
 // -- not fall through to covering everything.

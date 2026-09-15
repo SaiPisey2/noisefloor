@@ -128,7 +128,13 @@ func resolveTargets(pe ParsedExpr, services []Service) (names []string, scope st
 		}
 	}
 
-	if !spansEveryService(pe, hasSvc || hasNS || hasJob) {
+	// scoped, here, means "narrowed by SOME label matcher", not only by
+	// job/namespace/service: hasSvc/hasNS/hasJob alone under-counts it. See
+	// spansEveryService's doc comment for why any matcher at all -- even one
+	// this package cannot resolve to a discovered service -- must block the
+	// global inference.
+	scoped := hasSvc || hasNS || hasJob || len(pe.Matchers) > 0
+	if !spansEveryService(pe, scoped) {
 		return nil, "matched"
 	}
 	for _, s := range services {
@@ -154,6 +160,19 @@ func resolveTargets(pe ParsedExpr, services []Service) (names []string, scope st
 // scoped says: a rule reading `{service="ghost"}` with no aggregation
 // evaluates over exactly the series that selector matches, and if those
 // belong to no discovered service then the honest answer is "no service",
+// not "all of them".
+//
+// scoped must mean "carries ANY equality or regexp matcher beyond the
+// metric name", not only a job/namespace/service one -- resolveTargets
+// computes it that way, as len(pe.Matchers) > 0 rather than
+// hasSvc||hasNS||hasJob alone. A rule such as
+// `node_filesystem_avail_bytes{mountpoint="/",instance="node1"} < 1e9`
+// narrows to one filesystem on one node: it is scoped to SOMETHING, even
+// though this package has no idea what service that something belongs to,
+// and crediting it as `global` (as the narrower job/namespace/service-only
+// check did) marks every discovered service as covered by a rule that in
+// truth covers none of them. The honest answer for a matcher this package
+// cannot resolve is the same as for `{service="ghost"}` above: unattributed,
 // not "all of them".
 func spansEveryService(pe ParsedExpr, scoped bool) bool {
 	if !pe.HasAggregation {
