@@ -12,6 +12,7 @@ import (
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
 	"github.com/SaiPisey2/noisefloor/internal/config"
+	"github.com/SaiPisey2/noisefloor/internal/coverage"
 	"github.com/SaiPisey2/noisefloor/internal/pr"
 	"github.com/SaiPisey2/noisefloor/internal/report"
 	"github.com/SaiPisey2/noisefloor/internal/scanner"
@@ -88,6 +89,12 @@ rules:
   # to point a remediation PR at.
   # path: ./rules
   max_deactivated_fraction: 0.2
+
+# noisefloor coverage only; scan and remediate never read this. Discovery
+# from up{} plus Kubernetes namespace/service SD labels covers most setups
+# without any of this being set.
+# coverage:
+#   services: [checkout, billing]   # include even if up{} doesn't name them
 `
 
 func main() {
@@ -112,6 +119,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "coverage":
+		if err := runCoverage(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -125,6 +137,7 @@ usage:
   noisefloor scan [-config noisefloor.yaml]
   noisefloor init [-config noisefloor.yaml]
   noisefloor remediate [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
+  noisefloor coverage [-config noisefloor.yaml] [-detail]
 
 Opening pull requests (-apply) needs a GitHub token in $GITHUB_TOKEN.
 `)
@@ -282,5 +295,52 @@ func runRemediate(args []string) error {
 	}
 
 	pr.WriteResult(os.Stdout, runResult, *apply)
+	return nil
+}
+
+// runCoverage finds services with no alert coverage at all -- the inverse
+// of scan, which finds rules that alert for nothing. It is a separate
+// subcommand rather than a `scan` flag: it answers a different question
+// (which services exist and what signals alert on them, not how a rule's
+// own history behaves), against different Prometheus queries (`up` and a
+// traffic proxy, not ALERTS), and scan's report table is already fourteen
+// columns wide -- a coverage grid bolted onto it would serve neither
+// reading well.
+func runCoverage(args []string) error {
+	fs := flag.NewFlagSet("coverage", flag.ExitOnError)
+	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
+	detail := fs.Bool("detail", false, "also print the rule and reason behind every classification")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout.Std())
+	defer cancel()
+
+	api, err := prom.New(cfg.Prometheus)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	grid, parseErrors, err := coverage.Run(ctx, api, cfg, now)
+	if err != nil {
+		return err
+	}
+
+	if err := coverage.Render(os.Stdout, grid, parseErrors); err != nil {
+		return err
+	}
+	if *detail {
+		fmt.Println()
+		return coverage.RenderDetail(os.Stdout, grid)
+	}
 	return nil
 }
