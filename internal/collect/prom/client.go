@@ -31,6 +31,9 @@ type RuleGroup struct {
 
 type Client interface {
 	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (model.Matrix, error)
+	// Query runs an instant query at ts. internal/coverage uses it for `up`,
+	// where the question is "does this exist right now", not a range.
+	Query(ctx context.Context, query string, ts time.Time) (model.Value, error)
 	Rules(ctx context.Context) ([]RuleGroup, error)
 }
 
@@ -68,6 +71,19 @@ func (a *API) QueryRange(ctx context.Context, query string, start, end time.Time
 		return nil, fmt.Errorf("query_range %q returned %s, want matrix", query, val.Type())
 	}
 	return m, nil
+}
+
+func (a *API) Query(ctx context.Context, query string, ts time.Time) (model.Value, error) {
+	val, warnings, err := a.v1.Query(ctx, query, ts)
+	if err != nil {
+		return nil, fmt.Errorf("query %q @%s: %w", query, ts.Format(time.RFC3339), err)
+	}
+	if len(warnings) > 0 {
+		// See QueryRange's identical comment: warnings go to stderr, never
+		// stdout, so they cannot corrupt a report someone is piping.
+		fmt.Fprintf(os.Stderr, "prometheus warning: %v\n", warnings)
+	}
+	return val, nil
 }
 
 func (a *API) Rules(ctx context.Context) ([]RuleGroup, error) {

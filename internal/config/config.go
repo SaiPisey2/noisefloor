@@ -25,6 +25,19 @@ type Config struct {
 	// 1h, unchanged from before this was configurable.
 	FlapWindow Duration   `yaml:"flap_window"`
 	Confidence Confidence `yaml:"confidence"`
+	Coverage   Coverage   `yaml:"coverage"`
+}
+
+// Coverage configures `noisefloor coverage` only; scan and remediate never
+// read it.
+type Coverage struct {
+	// Services is an explicit list of service names to include in coverage
+	// discovery even where `up` and its Kubernetes SD labels don't name
+	// them -- a target scraped by a different Prometheus, or one whose job
+	// name doesn't match what the team calls it. Optional: discovery from
+	// `up` plus namespace/service SD labels covers the common case with no
+	// configuration at all.
+	Services []string `yaml:"services"`
 }
 
 type Prometheus struct {
