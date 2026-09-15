@@ -28,6 +28,21 @@ func buildSignalRows(signals map[string]float64, w config.Weights) []signalRow {
 		{Name: "offhours_rate", Value: pctOf(signals, "offhours_rate"), Weight: w.OffhoursRate, Weighted: true},
 	}
 	for i := range rows {
+		// pctOf, above, already rendered "-" for this row's Value when the
+		// signal is missing OR NaN (a rule scored before the signal
+		// existed, or a map that failed to deserialise). Either way there
+		// is no measurement to multiply by the weight: signals[name] reads
+		// 0 for a missing key, silently printing a contribution of "0.0"
+		// that looks like a measured zero rather than "not measured", and
+		// NaN for a present-but-NaN one, printing "NaN". Falling back to
+		// Weighted=false makes the template print "-" for both weight and
+		// contribution instead, exactly as it already does for a signal
+		// this table doesn't weight at all -- Value and Contribution never
+		// disagree about whether this row has a number.
+		if rows[i].Value == "-" {
+			rows[i].Weighted = false
+			continue
+		}
 		rows[i].Contribution = 100 * rows[i].Weight * signals[rows[i].Name]
 	}
 

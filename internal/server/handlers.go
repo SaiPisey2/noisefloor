@@ -118,9 +118,16 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 	var cols []columnHeader
 	for _, c := range columnOrder {
 		nextDir := "desc"
-		arrow := "↓" // down arrow: default direction shown when this column is not yet active
-		if c.key == sortKey {
-			arrow = "↓"
+		sorted := c.key == sortKey
+		// arrow is left at its zero value ("") for an inactive column: the
+		// template only renders Dir when Sorted is true, but leaving a
+		// stale "↓" here (the old default, never overwritten unless this
+		// column is the active one) meant an inactive columnHeader still
+		// carried a value claiming a current sort direction it does not
+		// have -- dead today only because the template happens to guard
+		// it, and wrong the moment anything else reads Dir.
+		var arrow string
+		if sorted {
 			if dir == "desc" {
 				nextDir, arrow = "asc", "↓"
 			} else {
@@ -130,7 +137,7 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 		cols = append(cols, columnHeader{
 			Label:  c.label,
 			URL:    "/?sort=" + c.key + "&dir=" + nextDir,
-			Sorted: c.key == sortKey,
+			Sorted: sorted,
 			Dir:    arrow,
 		})
 	}
