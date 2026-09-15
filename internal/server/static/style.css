@@ -74,6 +74,18 @@ tbody tr:nth-child(even) { background: var(--row-alt); }
 .badge-automate { background: var(--automate); }
 .badge-keep { background: var(--keep); }
 
+/* Estimated vs measured (issue #14): a score backed by real pager outcomes
+   must never look the same as one inferred from firing duration alone.
+   "measured" gets the accent color and full-strength badge treatment used
+   elsewhere for something noteworthy; "estimated" -- the default, and the
+   only state before this feature existed -- stays deliberately quiet
+   (outlined, muted text) so it reads as "the ordinary case", not an error. */
+.evid-measured { background: var(--accent); color: white; }
+.evid-estimated {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); font-weight: 500;
+}
+
 .verdict-summary { display: flex; gap: 1.5rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }
 .verdict-summary .window { color: var(--muted); }
 

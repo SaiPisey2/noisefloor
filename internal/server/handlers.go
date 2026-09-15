@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -196,6 +197,15 @@ func (s *Server) loadRuleDetail(ctx context.Context, id int64) (ruleDetail, bool
 	}
 	detail.Score = sc
 	detail.Signals = buildSignalRows(sc.Signals, s.cfg.Weights)
+	detail.Measured = sc.Signals["measured"] != 0
+	if detail.Measured {
+		detail.Evidence = fmt.Sprintf("This verdict is backed by measured pager outcomes "+
+			"(%s coverage of this rule's episodes) -- see the measured_* rows below.",
+			pctOf(sc.Signals, "measured_coverage"))
+	} else {
+		detail.Evidence = "This verdict is estimated from firing duration and silence " +
+			"history -- no pager enricher is configured, so no real acknowledgement data was available."
+	}
 
 	// The window a stored score was actually computed over, not this
 	// rule's entire history: internal/pr's tune proposal for this same

@@ -109,6 +109,33 @@ func TestBuildRetireProposal(t *testing.T) {
 	assertGolden(t, "testdata/golden/retire_body.golden.md", p.Body)
 }
 
+// TestBuildRetireProposalStatesMeasuredEvidence pins the PR-body surface
+// of the estimated/measured distinction (issue #14): a proposal built from
+// an eval whose signals carry real pager outcomes must say MEASURED and
+// state the ack/escalation numbers, not read identically to a
+// duration-only proposal.
+func TestBuildRetireProposalStatesMeasuredEvidence(t *testing.T) {
+	eval := retireEval(t)
+	eval.Signals.PagerOutcomes = &score.PagerOutcomes{
+		Source: "pagerduty", Coverage: 1, Matched: 400, AckRate: 0, EscalationRate: 0,
+	}
+	p, refusal, err := Build(eval)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if refusal != nil {
+		t.Fatalf("unexpected refusal: %v", refusal)
+	}
+	for _, want := range []string{"MEASURED pager outcomes via pagerduty", "400 pages", "100% coverage"} {
+		if !strings.Contains(p.Body, want) {
+			t.Errorf("body missing %q:\n%s", want, p.Body)
+		}
+	}
+	if strings.Contains(p.Body, "ESTIMATED signals only") {
+		t.Error("a proposal with measured evidence must not also claim it is estimated-only")
+	}
+}
+
 func TestBuildTuneProposal(t *testing.T) {
 	p, refusal, err := Build(tuneEval(t))
 	if err != nil {

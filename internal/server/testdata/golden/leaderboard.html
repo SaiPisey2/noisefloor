@@ -29,6 +29,7 @@
 <thead>
 <tr>
   <th><a href="/?sort=noise&amp;dir=asc">NOISE ↓</a></th><th><a href="/?sort=confidence&amp;dir=desc">CONF</a></th><th><a href="/?sort=verdict&amp;dir=desc">VERDICT</a></th><th><a href="/?sort=group&amp;dir=desc">GROUP</a></th><th><a href="/?sort=rule&amp;dir=desc">RULE</a></th>
+  <th title="Whether this verdict rests on real pager outcomes (measured) or is inferred from firing duration and silence history alone (estimated)">EVID</th>
   <th>FIRES</th><th>P50</th><th>SHORT</th><th>SILENCED</th><th>FLAP</th><th>COFIRE</th><th>CONC</th><th>CHURN</th><th>NIGHT</th>
 </tr>
 </thead>
@@ -40,6 +41,7 @@
   <td><span class="badge badge-tune">tune</span></td>
   <td>demo</td>
   <td><a href="/rules/2">FlappingRule</a></td>
+  <td><span class="badge evid-estimated" title="estimated">est</span></td>
   <td class="num">1186</td>
   <td class="num">4m</td>
   <td class="num">91%</td>
@@ -57,6 +59,7 @@
   <td><span class="badge badge-retire">retire</span></td>
   <td>demo</td>
   <td><a href="/rules/1">CauseySymptom</a></td>
+  <td><span class="badge evid-estimated" title="estimated">est</span></td>
   <td class="num">504</td>
   <td class="num">3m</td>
   <td class="num">100%</td>

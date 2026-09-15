@@ -83,6 +83,63 @@ func TestAPIRulesShape(t *testing.T) {
 	}
 }
 
+// TestAPIExposesMeasuredVsEstimated pins the API surface of the
+// estimated/measured distinction (issue #14): a score backed by real
+// pager outcomes must say so as a first-class field, not require a
+// client to know score.Signals.Map's internal key names.
+func TestAPIExposesMeasuredVsEstimated(t *testing.T) {
+	db := newTestDB(t)
+	srv := newTestServer(t, db)
+
+	estimated := seedRule(t, db, store.Rule{AlertName: "Estimated", GroupName: "g", Active: true})
+	seedEpisode(t, db, estimated, store.StateFiring, fixedNow.Add(-time.Hour), time.Minute)
+	seedScore(t, db, estimated, store.Score{
+		Verdict: score.VerdictRetire, NoiseScore: 45,
+		Signals: map[string]float64{"fires": 10},
+	})
+
+	measured := seedRule(t, db, store.Rule{AlertName: "Measured", GroupName: "g", Active: true})
+	seedEpisode(t, db, measured, store.StateFiring, fixedNow.Add(-time.Hour), time.Minute)
+	seedScore(t, db, measured, store.Score{
+		Verdict: score.VerdictTune, NoiseScore: 45,
+		Signals: map[string]float64{
+			"fires": 10, "measured": 1, "measured_coverage": 0.92, "measured_ack_rate": 0.8,
+		},
+	})
+
+	rec := get(t, srv.Handler(), "/api/scores")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var rows []struct {
+		AlertName        string  `json:"alert_name"`
+		Measured         bool    `json:"measured"`
+		MeasuredCoverage float64 `json:"measured_coverage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v\nbody: %s", err, rec.Body.String())
+	}
+	byName := map[string]struct {
+		Measured         bool
+		MeasuredCoverage float64
+	}{}
+	for _, r := range rows {
+		byName[r.AlertName] = struct {
+			Measured         bool
+			MeasuredCoverage float64
+		}{r.Measured, r.MeasuredCoverage}
+	}
+	if byName["Estimated"].Measured {
+		t.Error("Estimated row must report measured=false")
+	}
+	if !byName["Measured"].Measured {
+		t.Error("Measured row must report measured=true")
+	}
+	if got := byName["Measured"].MeasuredCoverage; got != 0.92 {
+		t.Errorf("measured_coverage = %v, want 0.92", got)
+	}
+}
+
 func TestAPIRuleDetailShape(t *testing.T) {
 	db := newTestDB(t)
 	srv := newTestServer(t, db)

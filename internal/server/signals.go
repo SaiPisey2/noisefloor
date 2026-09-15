@@ -54,6 +54,21 @@ func buildSignalRows(signals map[string]float64, w config.Weights) []signalRow {
 		signalRow{Name: "p50_duration", Value: formatDuration(durationOf(signals, "p50_duration_s"))},
 		signalRow{Name: "p90_duration", Value: formatDuration(durationOf(signals, "p90_duration_s"))},
 	)
+
+	// Measured pager evidence (issue #14) gets its own rows, appended last
+	// and never weighted -- see score.PagerOutcomes: it moves confidence
+	// and, in two narrow cases, the verdict, but it never contributes to
+	// NoiseScore, so it has no place among the weighted rows above. Only
+	// shown when an enricher actually matched something for this rule;
+	// absent that, this table looks exactly as it did before this
+	// feature.
+	if signals["measured"] != 0 {
+		rows = append(rows,
+			signalRow{Name: "measured_coverage", Value: pctOf(signals, "measured_coverage")},
+			signalRow{Name: "measured_ack_rate", Value: pctOf(signals, "measured_ack_rate")},
+			signalRow{Name: "measured_escalation_rate", Value: pctOf(signals, "measured_escalation_rate")},
+		)
+	}
 	return rows
 }
 

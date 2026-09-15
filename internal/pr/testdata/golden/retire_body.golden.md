@@ -2,6 +2,8 @@
 
 Proposed for deletion: `fixture` / `RetireMe`. This rule crosses noisefloor's retire threshold on the evidence below, gathered over the observation window stated here -- not asserted, checkable.
 
+This proposal is backed by ESTIMATED signals only: episode duration and silence history, inferred from firing shape. No pager enricher was configured for this scan, so no real acknowledgement data was available.
+
 | metric | value |
 | --- | --- |
 | fires | 120 |

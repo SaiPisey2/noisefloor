@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SaiPisey2/noisefloor/internal/score"
 	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
@@ -52,6 +53,36 @@ type Evidence struct {
 	// asserting it from a failed fetch is presenting an unmeasured number as
 	// a measured one.
 	SilencesAvailable bool
+
+	// PagerOutcomes is real pager evidence for this rule (issue #14), when
+	// a pager enricher matched at least one of its episodes. Nil for
+	// every proposal built without an enricher configured, which is every
+	// proposal before this feature -- the body then reads exactly as it
+	// always did. See RetireBody and TuneBody's evidenceStatement, which
+	// this drives: a proposal backed by "N pages, X% acknowledged" is a
+	// categorically stronger argument than one backed by duration alone,
+	// and the body says which it has.
+	PagerOutcomes *score.PagerOutcomes
+}
+
+// evidenceStatement is the one sentence every proposal body opens its
+// evidence section with, stating plainly whether the numbers below are
+// MEASURED (real pager outcomes) or ESTIMATED (inferred from firing
+// duration and silence history) -- the same distinction the scan table,
+// the API and the web UI surface, worded for a reviewer who does not use
+// any of those and only ever sees this PR.
+func evidenceStatement(p *score.PagerOutcomes) string {
+	if p == nil {
+		return "This proposal is backed by ESTIMATED signals only: episode duration and " +
+			"silence history, inferred from firing shape. No pager enricher was configured " +
+			"for this scan, so no real acknowledgement data was available."
+	}
+	return fmt.Sprintf(
+		"This proposal is backed in part by MEASURED pager outcomes via %s: %d pages "+
+			"covering %s of this rule's episodes, %s of them acknowledged and %s escalated -- "+
+			"real outcomes, not inferred from episode duration. See how that evidence is allowed "+
+			"to affect scoring in internal/score/verdict.go.",
+		p.Source, p.Matched, formatPercent(p.Coverage), formatPercent(p.AckRate), formatPercent(p.EscalationRate))
 }
 
 func (e Evidence) windowDays() float64 {
@@ -90,6 +121,8 @@ func RetireBody(e Evidence) string {
 			"threshold on the evidence below, gathered over the observation window "+
 			"stated here -- not asserted, checkable.\n\n", e.Group, e.AlertName)
 
+	fmt.Fprintf(&b, "%s\n\n", evidenceStatement(e.PagerOutcomes))
+
 	b.WriteString("| metric | value |\n")
 	b.WriteString("| --- | --- |\n")
 	fmt.Fprintf(&b, "| fires | %d |\n", e.Fires)
@@ -99,6 +132,11 @@ func RetireBody(e Evidence) string {
 		fmt.Fprintf(&b, "| silenced | %s |\n", formatPercent(e.SilencedRate))
 	} else {
 		b.WriteString("| silenced | **not measured** -- Alertmanager was unavailable for this scan |\n")
+	}
+	if e.PagerOutcomes != nil {
+		fmt.Fprintf(&b, "| pager acknowledged (measured, %s coverage) | %s |\n",
+			formatPercent(e.PagerOutcomes.Coverage), formatPercent(e.PagerOutcomes.AckRate))
+		fmt.Fprintf(&b, "| pager escalated (measured) | %s |\n", formatPercent(e.PagerOutcomes.EscalationRate))
 	}
 	fmt.Fprintf(&b, "| confidence | %.2f |\n", e.Confidence)
 	fmt.Fprintf(&b, "| observation window | %s to %s (%s) |\n",
@@ -143,10 +181,15 @@ func TuneBody(e Evidence, currentFor, candidateFor time.Duration, sentence strin
 	fmt.Fprintf(&b, "Proposed change: `%s` / `%s`. Raise `for: %s` to `for: %s`.\n\n",
 		e.Group, e.AlertName, formatDuration(currentFor), formatDuration(candidateFor))
 	fmt.Fprintf(&b, "%s\n\n", sentence)
+	fmt.Fprintf(&b, "%s\n\n", evidenceStatement(e.PagerOutcomes))
 
 	b.WriteString("| metric | value |\n")
 	b.WriteString("| --- | --- |\n")
 	fmt.Fprintf(&b, "| fires | %d |\n", e.Fires)
+	if e.PagerOutcomes != nil {
+		fmt.Fprintf(&b, "| pager acknowledged (measured, %s coverage) | %s |\n",
+			formatPercent(e.PagerOutcomes.Coverage), formatPercent(e.PagerOutcomes.AckRate))
+	}
 	fmt.Fprintf(&b, "| confidence | %.2f |\n", e.Confidence)
 	fmt.Fprintf(&b, "| observation window | %s to %s (%s) |\n",
 		e.WindowStart.Format(time.RFC3339), e.WindowEnd.Format(time.RFC3339), formatWindow(e.windowDays()))

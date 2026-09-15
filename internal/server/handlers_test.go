@@ -73,6 +73,36 @@ func TestLeaderboardShowsScoredRule(t *testing.T) {
 	}
 }
 
+// TestLeaderboardShowsEstimatedVsMeasured pins the web UI surface of the
+// distinction: an estimated row and a measured one must render visibly
+// different badges, not the same "est"/generic marker either way.
+func TestLeaderboardShowsEstimatedVsMeasured(t *testing.T) {
+	db := newTestDB(t)
+	srv := newTestServer(t, db)
+
+	est := seedRule(t, db, store.Rule{AlertName: "EstRule", GroupName: "g", Active: true})
+	seedEpisode(t, db, est, store.StateFiring, fixedNow.Add(-time.Hour), time.Minute)
+	seedScore(t, db, est, store.Score{Verdict: score.VerdictRetire, NoiseScore: 45, Signals: map[string]float64{}})
+
+	meas := seedRule(t, db, store.Rule{AlertName: "MeasRule", GroupName: "g", Active: true})
+	seedEpisode(t, db, meas, store.StateFiring, fixedNow.Add(-time.Hour), time.Minute)
+	seedScore(t, db, meas, store.Score{
+		Verdict: score.VerdictTune, NoiseScore: 45,
+		Signals: map[string]float64{"measured": 1, "measured_coverage": 0.75},
+	})
+
+	body := get(t, srv.Handler(), "/").Body.String()
+	if !strings.Contains(body, `class="badge evid-estimated"`) {
+		t.Errorf("missing estimated evidence badge:\n%s", body)
+	}
+	if !strings.Contains(body, `class="badge evid-measured"`) {
+		t.Errorf("missing measured evidence badge:\n%s", body)
+	}
+	if !strings.Contains(body, "measured (75% coverage)") {
+		t.Errorf("missing measured coverage tooltip text:\n%s", body)
+	}
+}
+
 func TestLeaderboardSort(t *testing.T) {
 	db := newTestDB(t)
 	srv := newTestServer(t, db)

@@ -10,10 +10,12 @@
 {{if $d.HasScore}}
 <div class="verdict-summary verdict-{{$d.Score.Verdict}}">
   <span class="badge badge-{{$d.Score.Verdict}} big">{{$d.Score.Verdict}}</span>
+  <span class="badge evid-{{if $d.Measured}}measured{{else}}estimated{{end}} big">{{if $d.Measured}}measured{{else}}estimated{{end}}</span>
   <span class="noise">noise {{printf "%.0f" $d.Score.NoiseScore}}</span>
   <span class="confidence">confidence {{printf "%.2f" $d.Score.Confidence}}</span>
   <span class="window">window {{$d.Score.WindowStart.Format "2006-01-02"}} to {{$d.Score.WindowEnd.Format "2006-01-02"}}</span>
 </div>
+<p class="lede evidence-statement">{{$d.Evidence}}</p>
 {{else}}
 <p class="empty">This rule has no score: it has never fired in the scored window, is currently inactive, or its alert name is defined in more than one rule group and cannot be scored.</p>
 {{end}}

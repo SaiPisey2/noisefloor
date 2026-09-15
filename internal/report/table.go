@@ -120,11 +120,17 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 	// `retire`, P50 is one of three conditions for `automate`, and off-hours
 	// carries scored weight. Without them the table shows a verdict it cannot
 	// justify.
-	fmt.Fprintln(tw, "NOISE\tCONF\tVERDICT\tGROUP\tRULE\tFIRES\tP50\tSHORT\tSILENCED\tFLAP\tCOFIRE\tCONC\tCHURN\tNIGHT")
+	// EVID states whether a row's verdict rests on real pager outcomes
+	// (issue #14) or is inferred from firing shape alone -- "measured" and
+	// "estimated" must never look the same, since the first is a
+	// categorically stronger claim. Absent an enricher (every rule here
+	// has a nil Signals.PagerOutcomes) every row reads "est", unchanged
+	// from before this column existed.
+	fmt.Fprintln(tw, "NOISE\tCONF\tEVID\tVERDICT\tGROUP\tRULE\tFIRES\tP50\tSHORT\tSILENCED\tFLAP\tCOFIRE\tCONC\tCHURN\tNIGHT")
 
 	for _, r := range sorted {
-		fmt.Fprintf(tw, "%.0f\t%.1f\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.Noise, r.Confidence, r.Verdict, r.GroupName, r.AlertName,
+		fmt.Fprintf(tw, "%.0f\t%.1f\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.Noise, r.Confidence, evidence(r.Signals), r.Verdict, r.GroupName, r.AlertName,
 			r.Signals.Fires,
 			formatDuration(r.Signals.P50Duration),
 			pct(r.Signals.ShortLivedRate),
@@ -189,6 +195,19 @@ func formatDuration(d time.Duration) string {
 		out += fmt.Sprintf("%d%s", units[i].v, units[i].u)
 	}
 	return out
+}
+
+// evidence renders the EVID column: "est" for a row scored entirely from
+// inferred signals, or "measNN%" naming the measured coverage (see
+// score.PagerOutcomes.Coverage) when a pager enricher matched at least one
+// of this rule's episodes. Low coverage still reads "meas", not "est" --
+// this column reports whether ANY real evidence was folded in at all, the
+// coverage number is what says how much to trust it.
+func evidence(s score.Signals) string {
+	if s.PagerOutcomes == nil {
+		return "est"
+	}
+	return fmt.Sprintf("meas%.0f%%", s.PagerOutcomes.Coverage*100)
 }
 
 // pct renders a rate. Signals are guarded at their source, but this is the

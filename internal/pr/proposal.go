@@ -187,6 +187,7 @@ func evidenceFrom(eval scanner.RuleEval) Evidence {
 		WindowStart:         eval.WindowStart, WindowEnd: eval.WindowEnd,
 		SilencedBy:        eval.SilencedBy,
 		SilencesAvailable: eval.SilencesAvailable,
+		PagerOutcomes:     eval.Signals.PagerOutcomes,
 	}
 }
 

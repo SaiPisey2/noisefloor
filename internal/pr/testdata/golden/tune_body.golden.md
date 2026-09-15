@@ -4,6 +4,8 @@ Proposed change: `fixture` / `TuneMe`. Raise `for: 1m` to `for: 6m`.
 
 p90 episode is 5m, current `for: 1m`; `for: 6m` would have suppressed 70% of past fires and retained 1 of 1 episodes longer than 12m.
 
+This proposal is backed by ESTIMATED signals only: episode duration and silence history, inferred from firing shape. No pager enricher was configured for this scan, so no real acknowledgement data was available.
+
 | metric | value |
 | --- | --- |
 | fires | 10 |

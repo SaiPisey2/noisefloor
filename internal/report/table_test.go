@@ -64,6 +64,47 @@ func TestRenderIncludesEvidenceColumns(t *testing.T) {
 	}
 }
 
+// TestRenderShowsEstimatedByDefault pins the no-enricher-configured case,
+// which is every scan today and the demo: a row with no PagerOutcomes must
+// read "est" in the EVID column, not blank and not "meas".
+func TestRenderShowsEstimatedByDefault(t *testing.T) {
+	rows := []Row{{AlertName: "DemoCauseA", GroupName: "demo", Verdict: score.VerdictRetire, Noise: 45}}
+	var sb strings.Builder
+	if err := Render(&sb, rows, testMeta()); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "EVID") {
+		t.Errorf("header missing EVID column:\n%s", out)
+	}
+	if !strings.Contains(out, "est") {
+		t.Errorf("row missing \"est\" evidence marker:\n%s", out)
+	}
+	if strings.Contains(out, "meas") {
+		t.Errorf("row with no PagerOutcomes must not read as measured:\n%s", out)
+	}
+}
+
+// TestRenderShowsMeasuredCoverageWhenEnricherMatched pins the other side:
+// a row backed by real pager outcomes must be visibly distinct from an
+// estimated one, and must state how much of the rule it covers.
+func TestRenderShowsMeasuredCoverageWhenEnricherMatched(t *testing.T) {
+	rows := []Row{{
+		AlertName: "PagedRule", GroupName: "demo", Verdict: score.VerdictTune, Noise: 45,
+		Signals: score.Signals{
+			PagerOutcomes: &score.PagerOutcomes{Source: "pagerduty", Coverage: 0.92, Matched: 400, AckRate: 0.8},
+		},
+	}}
+	var sb strings.Builder
+	if err := Render(&sb, rows, testMeta()); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, "meas92%") {
+		t.Errorf("output missing measured coverage marker \"meas92%%\":\n%s", out)
+	}
+}
+
 // TestRenderIncludesChurnAndP50 pins issue #3: pending_churn can flip a
 // verdict from retire to tune, and P50Duration is one of three conditions
 // for automate, but neither had a column -- a rule could show every other

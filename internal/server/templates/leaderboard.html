@@ -17,6 +17,7 @@
 <thead>
 <tr>
   {{range .Columns}}<th><a href="{{.URL}}">{{.Label}}{{if .Sorted}} {{.Dir}}{{end}}</a></th>{{end}}
+  <th title="Whether this verdict rests on real pager outcomes (measured) or is inferred from firing duration and silence history alone (estimated)">EVID</th>
   <th>FIRES</th><th>P50</th><th>SHORT</th><th>SILENCED</th><th>FLAP</th><th>COFIRE</th><th>CONC</th><th>CHURN</th><th>NIGHT</th>
 </tr>
 </thead>
@@ -28,6 +29,7 @@
   <td><span class="badge badge-{{.Verdict}}">{{.Verdict}}</span></td>
   <td>{{.GroupName}}</td>
   <td><a href="/rules/{{.ID}}">{{.AlertName}}</a></td>
+  <td><span class="badge evid-{{if .Measured}}measured{{else}}estimated{{end}}" title="{{.Evidence}}">{{if .Measured}}measured{{else}}est{{end}}</span></td>
   <td class="num">{{.Fires}}</td>
   <td class="num">{{.P50}}</td>
   <td class="num">{{.Short}}</td>

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/coverage"
@@ -38,6 +39,16 @@ type scoreAPI struct {
 	Confidence  float64            `json:"confidence"`
 	Signals     map[string]float64 `json:"signals"`
 	ComputedAt  time.Time          `json:"computed_at"`
+
+	// Measured and MeasuredCoverage restate signals["measured"] and
+	// signals["measured_coverage"] (see score.Signals.Map) as first-class
+	// fields, rather than requiring an API consumer to know those key
+	// names -- this row's verdict rests on real pager outcomes
+	// (issue #14) exactly this much, as opposed to being inferred purely
+	// from firing shape. False/0 for every score computed without a pager
+	// enricher configured, which is every score before this feature.
+	Measured         bool    `json:"measured"`
+	MeasuredCoverage float64 `json:"measured_coverage,omitempty"`
 }
 
 func newScoreAPI(sc store.Score) *scoreAPI {
@@ -45,6 +56,7 @@ func newScoreAPI(sc store.Score) *scoreAPI {
 		WindowStart: sc.WindowStart, WindowEnd: sc.WindowEnd,
 		Verdict: sc.Verdict, NoiseScore: sc.NoiseScore, Confidence: sc.Confidence,
 		Signals: sc.Signals, ComputedAt: sc.ComputedAt,
+		Measured: sc.Signals["measured"] != 0, MeasuredCoverage: sc.Signals["measured_coverage"],
 	}
 }
 
@@ -175,11 +187,20 @@ type leaderboardRow struct {
 	Conc       string
 	Churn      string
 	Night      string
+
+	// Measured and Evidence mirror report.Render's EVID column and
+	// scoreAPI's Measured/MeasuredCoverage fields (see their doc
+	// comments): the same estimated-vs-measured distinction, rendered the
+	// same way, in every surface. Evidence is "estimated" or
+	// "measured (NN% coverage)"; Measured is the plain boolean the
+	// template uses to pick a badge class.
+	Measured bool
+	Evidence string
 }
 
 func newLeaderboardRow(r store.Rule, sc store.Score) leaderboardRow {
 	s := sc.Signals
-	return leaderboardRow{
+	row := leaderboardRow{
 		ID: r.ID, AlertName: r.AlertName, GroupName: r.GroupName,
 		Verdict: sc.Verdict, Noise: sc.NoiseScore, Confidence: sc.Confidence,
 		Fires:    intOf(s, "fires"),
@@ -192,6 +213,13 @@ func newLeaderboardRow(r store.Rule, sc store.Score) leaderboardRow {
 		Churn:    pctOf(s, "pending_churn"),
 		Night:    pctOf(s, "offhours_rate"),
 	}
+	row.Measured = s["measured"] != 0
+	if row.Measured {
+		row.Evidence = fmt.Sprintf("measured (%s coverage)", pctOf(s, "measured_coverage"))
+	} else {
+		row.Evidence = "estimated"
+	}
+	return row
 }
 
 // signalRow is one line of the rule-detail page's signal breakdown table:
@@ -222,6 +250,13 @@ type ruleDetail struct {
 	Counterfactual         *remediate.Counterfactual
 	CounterfactualSentence string
 	P90                    time.Duration
+
+	// Measured and Evidence are the same estimated-vs-measured statement
+	// as the leaderboard's row and the API's scoreAPI, rendered as one
+	// sentence for the detail page's banner -- see leaderboardRow's doc
+	// comment. Empty/false when there is no score at all (HasScore false).
+	Measured bool
+	Evidence string
 }
 
 // columnHeader is one sortable leaderboard column header.
