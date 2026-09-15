@@ -12,7 +12,7 @@
 | proposed `for:` | 10m | no -- a fixed template default |
 | proposed threshold | see expression below | **partially** -- scaled from this service's own current reading, see below |
 
-**Where the threshold comes from:** this service's own current error ratio, measured over the last 30m, is 3%; the threshold below is 3x that (9%).
+**Where the threshold comes from:** this service's own current error ratio, measured over the last 30m, is 3%; the threshold below is 3x that (9%). The expression also carries a minimum-traffic guard: it cannot fire unless search is serving at least 0.2 requests/second over the same window, so a single failed request on a quiet night cannot produce a ratio of 1.0 and page somebody.
 
 **Proposed rule** (appended to group `services` in `testdata/starter_fixture.yml`):
 
@@ -22,9 +22,11 @@
     sum(rate(http_requests_total{job="search",code=~"5.."}[5m]))
     /
     sum(rate(http_requests_total{job="search"}[5m])) > 0.09
+    and
+    sum(rate(http_requests_total{job="search"}[5m])) > 0.2
   for: 10m
   labels: {severity: page}
-  annotations: {summary: "search error rate above 9%"}
+  annotations: {summary: "search error rate above 9% (at 0.2+ req/s)"}
 ```
 
 **How to check this**

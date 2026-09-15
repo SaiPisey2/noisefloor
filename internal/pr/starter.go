@@ -61,6 +61,19 @@ const (
 	ReasonUncertainCoverage RefusalReason = "existing coverage on this signal is a guess, not certain; " +
 		"propose will not add a second rule on top of a classification it cannot confirm"
 	ReasonNoTarget RefusalReason = "could not determine which existing rule group to add this rule to"
+	// ReasonUnverifiable is verifyStarterClassification failing: the rule a
+	// template produced does not come back out of coverage's own classifier
+	// as the signal it was built for. It is a refusal for THIS service, not
+	// an error, because the templates are per-signal and per-metric: the
+	// one service exposing a convention no template covers must not stop
+	// noisefloor looking at the rest of the fleet. See RunStarters.
+	ReasonUnverifiable RefusalReason = "the rule this template produced does not classify back as the signal " +
+		"it was built for; refusing to propose a rule noisefloor would not itself recognise"
+	// ReasonIntermittentTraffic is the scale-to-zero guard on the absent()
+	// rate template -- see probeRate.
+	ReasonIntermittentTraffic RefusalReason = "this service's request series went absent at least once in the " +
+		"last 24h (scale-to-zero, a scaled-down deployment, a nightly batch): an absent() starter rule would " +
+		"already have paged for it, so it is not proposed"
 )
 
 // StarterPriority is the order propose tries signals in for one blind-spot
@@ -111,6 +124,13 @@ type starterMeasurement struct {
 	// since "derived from your own p99" and "a hardcoded default" are very
 	// different claims about the same-looking number.
 	Derived bool
+
+	// Refuse, when non-empty, is a reason the probe itself found for not
+	// proposing this signal for this service at all -- something only a
+	// query against the service's own history can establish, as distinct
+	// from the refusals BuildStarter derives from the coverage grid. See
+	// probeRate's scale-to-zero check.
+	Refuse RefusalReason
 }
 
 // serviceSelector returns the PromQL label matcher fragment that names one
@@ -144,6 +164,16 @@ func queryVector(ctx context.Context, api prom.Client, query string, now time.Ti
 // queryScalarSum runs an instant query and sums every returned series'
 // value, reporting ok=false for an empty result (nothing to sum -- e.g. a
 // ratio's denominator was zero) rather than a misleading 0.
+//
+// Non-finite readings are skipped, and +Inf matters as much as NaN here:
+// histogram_quantile returns +Inf whenever the requested quantile falls in
+// the `+Inf` bucket, which every histogram has and which a service with a
+// long tail (or a badly-chosen top bucket) lands in routinely. Only NaN was
+// skipped before, so a p99 of +Inf reached latencyTemplate intact and came
+// back out as `> 9223372036.8548` under a PR body stating, as a measured
+// fact, "current p99 is 2562047h47m16s". ok=false is the honest result:
+// there was nothing measurable, so the template falls back to its fixed
+// default and the body says that instead.
 func queryScalarSum(ctx context.Context, api prom.Client, query string, now time.Time) (value float64, ok bool, err error) {
 	vec, err := queryVector(ctx, api, query, now)
 	if err != nil {
@@ -155,13 +185,22 @@ func queryScalarSum(ctx context.Context, api prom.Client, query string, now time
 	var sum float64
 	any := false
 	for _, s := range vec {
-		if math.IsNaN(float64(s.Value)) {
+		if !isFinite(float64(s.Value)) {
 			continue
 		}
 		sum += float64(s.Value)
 		any = true
 	}
+	if !isFinite(sum) {
+		return 0, false, nil // finite addends can still overflow
+	}
 	return sum, any, nil
+}
+
+// isFinite reports whether v is a real number a threshold can be derived
+// from -- neither NaN nor either infinity.
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // RequestCounterMetrics used by the rate/errors starter templates are
@@ -172,15 +211,22 @@ var requestCounterMetrics = coverage.RequestCounters
 
 // durationHistogramMetrics are the request/operation duration histogram
 // naming conventions the latency starter template looks for. Prometheus's
-// histogram convention always exposes `<name>_bucket`; coverage.Classify
-// recognises any metric name containing "duration" or "latency" by
-// substring, and every name here contains "duration", so a rule built from
-// one of these is also a rule coverage would itself classify as latency
-// once it exists -- see verifyStarterClassification.
+// histogram convention always exposes `<name>_bucket`.
+//
+// Every name here must ALSO be one coverage.Classify reads as latency, or a
+// rule built from it is refused by verifyStarterClassification the moment
+// it is generated. Two of the three do not contain "duration" or "latency"
+// at all -- Micrometer/Spring Boot times requests as
+// http_server_requests_seconds and go-grpc-prometheus as
+// grpc_server_handling_seconds -- so coverage.classifyMetricName carries
+// those conventions explicitly. A comment here once claimed every name
+// contained "duration"; it did not, and the two that did not were a
+// guaranteed refusal for every Spring Boot and gRPC service in a fleet.
+// Extend BOTH lists together, or not at all.
 var durationHistogramMetrics = []string{
 	"http_request_duration_seconds",
 	"http_server_requests_seconds", // Micrometer / Spring Boot naming
-	"grpc_server_handling_seconds",
+	"grpc_server_handling_seconds", // go-grpc-prometheus naming
 }
 
 // saturationMetrics are the resource-utilisation metric naming conventions
@@ -194,7 +240,21 @@ var durationHistogramMetrics = []string{
 // adding a second mechanism.
 var saturationMetrics = []string{"process_resident_memory_bytes"}
 
-// probeRate finds the first request/operation counter this service exposes.
+// quietWindow is how far back probeRate looks for a period in which this
+// service's request series was not there at all. One full day: a scale-to-
+// zero deployment, a nightly batch and an overnight scale-down all repeat
+// on exactly that cycle, and a shorter window run at the wrong hour sees
+// nothing.
+const quietWindow = 24 * time.Hour
+
+// quietStep is the resolution probeRate samples quietWindow at. Comfortably
+// finer than the 10m `for:` the rate template proposes, so a gap long
+// enough to have paged cannot fall between two samples.
+const quietStep = 5 * time.Minute
+
+// probeRate finds the first request/operation counter this service exposes,
+// then checks whether that series has actually been continuously present --
+// see rateTemplate for why a starter absent() rule is refused if it has not.
 func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, now time.Time) (starterMeasurement, error) {
 	sel := serviceSelector(svc)
 	for _, metric := range requestCounterMetrics {
@@ -202,11 +262,43 @@ func probeRate(ctx context.Context, api prom.Client, svc coverage.Service, now t
 		if err != nil {
 			return starterMeasurement{}, err
 		}
-		if len(vec) > 0 {
-			return starterMeasurement{Supported: true, MetricUsed: metric, Selector: sel}, nil
+		if len(vec) == 0 {
+			continue
 		}
+		m := starterMeasurement{Supported: true, MetricUsed: metric, Selector: sel}
+		quiet, err := wentQuiet(ctx, api, metric, sel, now)
+		if err != nil {
+			return starterMeasurement{}, err
+		}
+		if quiet {
+			m.Refuse = ReasonIntermittentTraffic
+		}
+		return m, nil
 	}
 	return starterMeasurement{}, nil
+}
+
+// wentQuiet reports whether metric{sel} was absent at any point in
+// quietWindow while the service's own targets were still being scraped.
+//
+// The `and count(up{sel}) > 0` half is what makes this a measurement rather
+// than an artefact: absent() is equally true before a service was ever
+// scraped, so without it every service in a Prometheus younger than
+// quietWindow would look like it scales to zero. Gating on `up` restricts
+// the question to steps where this service existed and Prometheus was
+// watching it, which is exactly the period an absent() rule would have been
+// evaluating over.
+func wentQuiet(ctx context.Context, api prom.Client, metric, sel string, now time.Time) (bool, error) {
+	query := fmt.Sprintf("max_over_time(((absent(%s{%s}) or vector(0)) and (count(up{%s}) > 0))[%s:%s])",
+		metric, sel, sel, formatRange(quietWindow), formatRange(quietStep))
+	value, ok, err := queryScalarSum(ctx, api, query, now)
+	if err != nil {
+		return false, err
+	}
+	// ok=false means the gate never opened: Prometheus has no `up` history
+	// for this service in the window at all, so there is nothing to
+	// conclude either way and the template is not refused on no evidence.
+	return ok && value > 0, nil
 }
 
 // probeErrors finds a request counter that also carries an HTTP-style
@@ -379,12 +471,32 @@ func serviceIdent(name string) string {
 // rateTemplate proposes a "traffic disappeared" check: absent() over the
 // request counter this service exposes.
 //
-// Deliberately has NO threshold to derive at all -- absent() checks for the
-// total lack of a series, not a value crossing a level, so there is
-// nothing here that a service's own history could scale. That makes it the
-// single safest starter template: it can be wrong about how LONG an outage
-// has to last before paging (the `for:`), but it cannot be wrong about
-// what "no traffic" means the way a guessed rate or latency threshold can.
+// It has no threshold to derive -- absent() checks for the total lack of a
+// series, not a value crossing a level -- and that once read as making it
+// the safest template of the four, on the grounds that it "cannot be wrong
+// about what no traffic means". It can. It is wrong about it for every
+// workload that is SUPPOSED to have no traffic some of the time: a KEDA-
+// scaled deployment, a replica set scaled to zero overnight, a nightly
+// batch job. This template is also the default proposal, since rate leads
+// StarterPriority, so the first thing noisefloor ever offered such a team
+// was a page-severity rule that fires every night -- the exact "starter
+// rule that pages on day one" this file's own package doc forbids. Idle
+// does not catch it either: idle is a thirty-day average, and a service
+// that serves real traffic for sixteen hours and none for eight averages
+// out as busy.
+//
+// So the refusal is measured instead of guessed. probeRate asks whether
+// this service's request series has actually gone absent in the last day
+// (wentQuiet), and the template is refused for exactly the services where
+// the answer is yes -- which is to say, refused precisely when the
+// measurement shows it would already have fired. The alternative, widening
+// the template to tolerate quiet periods, was rejected: it would mean
+// encoding a guess at somebody's maintenance schedule (which hours are
+// allowed to be silent, in whose timezone) into a page-severity rule, and
+// noisefloor has no way to measure any of that. Refusing costs the service
+// nothing -- RunStarters simply moves to the next signal in
+// StarterPriority -- and the refusal names the reason, which a guessed
+// quiet window never could.
 func rateTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 	ident := serviceIdent(svc.Name)
 	return starterRule{
@@ -413,6 +525,37 @@ const errorRatioFloor = 0.05
 // day one produces a page.
 const errorRatioMultiple = 3
 
+// errorRatioCeiling caps that scaled threshold. An error RATIO cannot
+// exceed 1.0, so any threshold at or above 1.0 is a rule that can never
+// fire -- and 3x is exactly the multiple that produces one from an
+// unremarkable input: a propose run during an incident, with a current
+// ratio of 0.45, emitted `> 1.35` as a `severity: page` rule whose body
+// called the number measured. A rule that cannot fire is worse than no
+// rule, because it looks like coverage.
+//
+// 0.5 rather than something just under 1.0: a threshold needs headroom
+// below the ceiling to be an alert rather than a formality, and a service
+// failing half its requests is unambiguously broken by any standard. When
+// the cap binds, the arithmetic behind the number stopped being a
+// measurement of this service, and Explained says so rather than repeating
+// the "Nx your current ratio" sentence.
+const errorRatioCeiling = 0.5
+
+// starterMinRequestRate is the minimum request rate, in requests per
+// second averaged over the rule's own 5m window, below which the error
+// ratio is not meaningful enough to page on -- see errorsTemplate's
+// denominator guard.
+//
+// 0.2/s is 60 requests per five-minute window, so a 5% threshold needs
+// three failures rather than one to cross. Without a guard the ratio is
+// arithmetic on single events: one 500 in a window that carried one request
+// is a ratio of 1.0, and `for: 10m, severity: page` then wakes somebody for
+// it. Low traffic is exactly where a brand-new rule is least able to tell
+// an incident from a rounding error, and the guard lives in the expression
+// rather than in propose's own filtering because traffic at propose time
+// says nothing about traffic at 3am.
+const starterMinRequestRate = 0.2
+
 func errorsTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 	ident := serviceIdent(svc.Name)
 	threshold := errorRatioFloor
@@ -421,16 +564,27 @@ func errorsTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 			"the threshold below is a fixed default (%s), not derived from this service at all.",
 		formatRange(probeWindow), formatPercent(errorRatioFloor))
 	derived := false
-	if m.Derived {
-		scaled := m.Current * errorRatioMultiple
-		if scaled > threshold {
+	if m.Derived && isFinite(m.Current) {
+		switch scaled := m.Current * errorRatioMultiple; {
+		case scaled >= errorRatioCeiling:
+			threshold = errorRatioCeiling
+			explained = fmt.Sprintf(
+				"this service's own current error ratio, measured over the last %s, is %s -- so high that "+
+					"%dx it (%s) is at or past the %s ceiling noisefloor caps a starter threshold at, and "+
+					"%s of that would be above 1.0, which an error ratio can never reach. The threshold "+
+					"below is that ceiling, NOT a multiple of anything measured here: a current ratio this "+
+					"high means the service is failing right now, and today's behaviour is the wrong thing "+
+					"to calibrate a new alert against.",
+				formatRange(probeWindow), formatPercent(m.Current), errorRatioMultiple,
+				formatPercent(scaled), formatPercent(errorRatioCeiling), formatPercent(scaled))
+		case scaled > threshold:
 			threshold = scaled
 			derived = true
 			explained = fmt.Sprintf(
 				"this service's own current error ratio, measured over the last %s, is %s; "+
 					"the threshold below is %dx that (%s).",
 				formatRange(probeWindow), formatPercent(m.Current), errorRatioMultiple, formatPercent(threshold))
-		} else {
+		default:
 			explained = fmt.Sprintf(
 				"this service's own current error ratio, measured over the last %s, is %s -- "+
 					"%dx that would be below noisefloor's %s floor for a brand-new rule, so the "+
@@ -438,17 +592,24 @@ func errorsTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 				formatRange(probeWindow), formatPercent(m.Current), errorRatioMultiple, formatPercent(errorRatioFloor))
 		}
 	}
+	total := fmt.Sprintf("sum(rate(%s{%s}[5m]))", m.MetricUsed, m.Selector)
 	expr := fmt.Sprintf(
-		"sum(rate(%s{%s,%s=~\"5..\"}[5m]))\n/\nsum(rate(%s{%s}[5m])) > %s",
-		m.MetricUsed, m.Selector, m.CodeLabel, m.MetricUsed, m.Selector, formatThreshold(threshold))
+		"sum(rate(%s{%s,%s=~\"5..\"}[5m]))\n/\n%s > %s\nand\n%s > %s",
+		m.MetricUsed, m.Selector, m.CodeLabel, total, formatThreshold(threshold),
+		total, formatThreshold(starterMinRequestRate))
 	return starterRule{
-		AlertName:        ident + "ErrorRateHigh",
-		Expr:             expr,
-		For:              10 * time.Minute,
-		Severity:         "page",
-		Summary:          fmt.Sprintf("%s error rate above %s", svc.Name, formatPercent(threshold)),
+		AlertName: ident + "ErrorRateHigh",
+		Expr:      expr,
+		For:       10 * time.Minute,
+		Severity:  "page",
+		Summary: fmt.Sprintf("%s error rate above %s (at %s+ req/s)",
+			svc.Name, formatPercent(threshold), formatThreshold(starterMinRequestRate)),
 		ThresholdDerived: derived,
-		Explained:        explained,
+		Explained: explained + fmt.Sprintf(
+			" The expression also carries a minimum-traffic guard: it cannot fire unless %s is serving at "+
+				"least %s requests/second over the same window, so a single failed request on a quiet night "+
+				"cannot produce a ratio of 1.0 and page somebody.",
+			svc.Name, formatThreshold(starterMinRequestRate)),
 	}
 }
 
@@ -463,6 +624,17 @@ const latencyMultiple = 2
 // HTTP-shaped request with no history to say otherwise.
 const latencyFloor = 2 * time.Second
 
+// latencyCeiling caps the scaled threshold, for the same reason
+// errorRatioCeiling does: a derived number has to stay inside the range the
+// metric can usefully reach. A ratio's range is capped at 1.0 outright; a
+// latency's is capped in practice by whatever times a request out, and a
+// p99 read during a stall can be arbitrarily large. Scaling an already
+// pathological reading by 2 produces a rule that will not fire until the
+// service is further gone than it was when noisefloor called it broken.
+// Two minutes is past any HTTP or gRPC deadline worth alerting under, so a
+// threshold above it is not measuring slowness any more.
+const latencyCeiling = 2 * time.Minute
+
 func latencyTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 	ident := serviceIdent(svc.Name)
 	threshold := latencyFloor
@@ -471,23 +643,32 @@ func latencyTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 			"the threshold below is a fixed default (%s), not derived from this service at all.",
 		formatRange(probeWindow), formatDuration(latencyFloor))
 	derived := false
-	if m.Derived {
-		scaled := time.Duration(m.Current * latencyMultiple * float64(time.Second))
-		if scaled > threshold {
+	if m.Derived && isFinite(m.Current) {
+		current := time.Duration(m.Current * float64(time.Second))
+		switch scaled := time.Duration(m.Current * latencyMultiple * float64(time.Second)); {
+		case scaled >= latencyCeiling:
+			threshold = latencyCeiling
+			explained = fmt.Sprintf(
+				"this service's own current p99 latency, measured over the last %s, is %s -- so high that "+
+					"%dx it (%s) is at or past the %s ceiling noisefloor caps a starter threshold at. The "+
+					"threshold below is that ceiling, NOT a multiple of anything measured here: a p99 this "+
+					"high means the service is already in trouble, and today's behaviour is the wrong thing "+
+					"to calibrate a new alert against.",
+				formatRange(probeWindow), formatDuration(current), latencyMultiple,
+				formatDuration(scaled), formatDuration(latencyCeiling))
+		case scaled > threshold:
 			threshold = scaled
 			derived = true
 			explained = fmt.Sprintf(
 				"this service's own current p99 latency, measured over the last %s, is %s; "+
 					"the threshold below is %dx that (%s).",
-				formatRange(probeWindow), formatDuration(time.Duration(m.Current*float64(time.Second))),
-				latencyMultiple, formatDuration(threshold))
-		} else {
+				formatRange(probeWindow), formatDuration(current), latencyMultiple, formatDuration(threshold))
+		default:
 			explained = fmt.Sprintf(
 				"this service's own current p99 latency, measured over the last %s, is %s -- "+
 					"%dx that would be below noisefloor's %s floor for a brand-new rule, so the "+
 					"floor is used instead.",
-				formatRange(probeWindow), formatDuration(time.Duration(m.Current*float64(time.Second))),
-				latencyMultiple, formatDuration(latencyFloor))
+				formatRange(probeWindow), formatDuration(current), latencyMultiple, formatDuration(latencyFloor))
 		}
 	}
 	expr := fmt.Sprintf("histogram_quantile(0.99, sum(rate(%s_bucket{%s}[5m])) by (le)) > %s",
@@ -512,6 +693,18 @@ const saturationMultiple = 1.5
 // this is here purely as a defensive fallback -- see saturationTemplate).
 const saturationFloor = 5e8 // 500MB, the demo's own hand-tuned convention
 
+// saturationCeiling caps the scaled threshold, on the same reasoning as
+// errorRatioCeiling and latencyCeiling: the derived number has to stay
+// somewhere the metric can actually go. Resident memory has no arithmetic
+// bound the way a ratio does, but it has a practical one -- a process is
+// bounded by its cgroup limit, and past 32GB a resident-memory page
+// threshold is beyond what all but a handful of workloads are ever given,
+// so the rule sits there looking like coverage and never fires. A reading
+// large enough to scale past this is far more likely to be a leak already
+// in progress than a normal baseline, and a leak is not something to
+// calibrate a brand-new threshold against.
+const saturationCeiling = 3.2e10 // 32GB
+
 func saturationTemplate(svc coverage.Service, m starterMeasurement) starterRule {
 	ident := serviceIdent(svc.Name)
 	threshold := saturationFloor
@@ -519,15 +712,26 @@ func saturationTemplate(svc coverage.Service, m starterMeasurement) starterRule 
 		"could not read a current value for %s; the threshold below is a fixed default "+
 			"(%s), not derived from this service at all.", m.MetricUsed, formatBytes(saturationFloor))
 	derived := false
-	if m.Derived {
+	if m.Derived && isFinite(m.Current) {
 		scaled := m.Current * saturationMultiple
-		if scaled > threshold {
-			threshold = scaled
+		switch {
+		case scaled >= saturationCeiling:
+			threshold = saturationCeiling
+			explained = fmt.Sprintf(
+				"this service's own current %s reading is %s -- so high that %gx it (%s) is at or past "+
+					"the %s ceiling noisefloor caps a starter threshold at. The threshold below is that "+
+					"ceiling, NOT a multiple of anything measured here.",
+				m.MetricUsed, formatBytes(m.Current), saturationMultiple,
+				formatBytes(scaled), formatBytes(saturationCeiling))
+		default:
+			if scaled > threshold {
+				threshold = scaled
+			}
+			derived = true
+			explained = fmt.Sprintf(
+				"this service's own current %s reading is %s; the threshold below is %gx that (%s).",
+				m.MetricUsed, formatBytes(m.Current), saturationMultiple, formatBytes(threshold))
 		}
-		derived = true
-		explained = fmt.Sprintf(
-			"this service's own current %s reading is %s; the threshold below is %gx that (%s).",
-			m.MetricUsed, formatBytes(m.Current), saturationMultiple, formatBytes(threshold))
 	}
 	expr := fmt.Sprintf("sum(%s{%s}) > %s", m.MetricUsed, m.Selector, formatThreshold(threshold))
 	return starterRule{
@@ -565,9 +769,15 @@ func buildTemplate(sig coverage.Signal, svc coverage.Service, m starterMeasureme
 // than as a comment: every template above is hand-written to match
 // coverage's own recognised metric shapes, and this assertion is what
 // catches the two from drifting apart silently if either one changes later
-// without the other. It is not expected to ever fail in production; it
-// exists to fail LOUDLY (as an error, refusing the proposal) rather than
-// silently if it ever does.
+// without the other.
+//
+// Its failure is reported LOUDLY but LOCALLY: BuildStarter turns it into a
+// ReasonUnverifiable refusal naming this service and signal, never an
+// error. It used to abort RunStarters outright, which meant one service
+// whose instrumentation followed a convention no template covered ended the
+// whole run -- after earlier services' pull requests had already been
+// opened, leaving a partial result with no explanation of where it stopped
+// or why. A per-service problem gets a per-service answer.
 func verifyStarterClassification(sig coverage.Signal, rule starterRule) error {
 	pe, err := coverage.Extract(rule.Expr)
 	if err != nil {
@@ -672,13 +882,19 @@ func BuildStarter(in StarterInput) (*Proposal, *Refusal, error) {
 	if !in.Measurement.Supported {
 		return nil, &Refusal{Group: name, AlertName: string(sig), Reason: ReasonNoMetric}, nil
 	}
+	if r := in.Measurement.Refuse; r != "" {
+		return nil, &Refusal{Group: name, AlertName: string(sig), Reason: r}, nil
+	}
 	if in.Target.File == "" || in.Target.Group == "" {
 		return nil, &Refusal{Group: name, AlertName: string(sig), Reason: ReasonNoTarget}, nil
 	}
 
 	rule := buildTemplate(sig, in.Service, in.Measurement)
 	if err := verifyStarterClassification(sig, rule); err != nil {
-		return nil, nil, err
+		return nil, &Refusal{
+			Group: name, AlertName: string(sig),
+			Reason: ReasonUnverifiable, Detail: err.Error(),
+		}, nil
 	}
 
 	edit, err := starterEdit(in.Target, rule)
