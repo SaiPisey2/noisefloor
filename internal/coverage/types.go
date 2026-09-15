@@ -172,10 +172,25 @@ func (sc ServiceCoverage) AnyCoverage() bool {
 // for the entire estate -- turning the one honest fix for global
 // attribution (see resolveTargets) into a way to hide every gap it exists
 // to surface.
+//
+// It also requires Certain: a "matched" scope only says a rule's own label
+// matchers name this service; it says nothing about whether Classify was
+// SURE what signal that rule is about. Before this required Certain too, a
+// guessed classification (Certain: false -- a heuristic read, not a
+// confident one, see Classify) cleared a service off the blind-spot list
+// exactly as if it were confirmed, and propose's own ReasonUncertainCoverage
+// refusal existed specifically because certain=false is not "covered" --
+// AnyScopedCoverage disagreeing with that everywhere else it is asked meant
+// a guess could hide a blind spot from the report entirely, with no refusal
+// and no row to say why. A tool that knows it is guessing must not let that
+// guess stand in for knowledge -- so a service whose only scoped match on a
+// signal is uncertain is still a blind spot: it surfaces here, and reaches
+// propose's own explicit ReasonUncertainCoverage refusal instead of
+// vanishing silently.
 func (sc ServiceCoverage) AnyScopedCoverage() bool {
 	for _, sig := range Signals {
 		for _, m := range sc.Covered[sig] {
-			if m.Scope == "matched" {
+			if m.Scope == "matched" && m.Certain {
 				return true
 			}
 		}

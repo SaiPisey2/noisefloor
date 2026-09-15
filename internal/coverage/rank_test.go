@@ -102,12 +102,17 @@ func TestRankBlindSpotsSingleBlindSpotUsesAbsoluteFloor(t *testing.T) {
 // TestRankBlindSpotsAllEqualTrafficUsesAbsoluteFloor: the other shape the
 // median cannot see. Every service idle at the SAME value makes the median
 // that value, so nothing is below 5% of it -- a dev cluster ticking over at
-// half a request per second per service produced a page-severity starter PR
-// for every service in it.
+// a trickle per service, all reading the same, produced a page-severity
+// starter PR for every service in it with no absolute floor to catch it.
+//
+// The traffic value here (0.15 req/s) is deliberately BELOW
+// requestIdleFloor: this test is about the degenerate-median mechanism, not
+// about where the floor sits -- see TestRequestIdleFloorDoesNotFlagRealTraffic
+// for that.
 func TestRankBlindSpotsAllEqualTrafficUsesAbsoluteFloor(t *testing.T) {
 	var grid []ServiceCoverage
 	for _, name := range []string{"a", "b", "c", "d"} {
-		grid = append(grid, ServiceCoverage{Service: Service{Name: name, Traffic: 0.5, TrafficBasis: BasisRequests}})
+		grid = append(grid, ServiceCoverage{Service: Service{Name: name, Traffic: 0.15, TrafficBasis: BasisRequests}})
 	}
 	got := RankBlindSpots(grid)
 	if len(got) != 4 {
@@ -115,8 +120,28 @@ func TestRankBlindSpotsAllEqualTrafficUsesAbsoluteFloor(t *testing.T) {
 	}
 	for _, b := range got {
 		if !b.Idle {
-			t.Errorf("%s at 0.5 req/s: Idle = false, want true (every service in the cluster reads the same)", b.Service.Name)
+			t.Errorf("%s at 0.15 req/s: Idle = false, want true (every service in the cluster reads the same, "+
+				"and 0.15 req/s is genuinely negligible)", b.Service.Name)
 		}
+	}
+}
+
+// TestRequestIdleFloorDoesNotFlagRealTraffic is the flip side of the fix:
+// requestIdleFloor used to sit at 1.0 req/s, derived from the ERROR-RATIO
+// noise guard's own reasoning (a single failed request in a 5m window
+// moving a ratio by a whole percentage point) rather than from what idle
+// itself needs to protect against -- and that guard already has an owner,
+// internal/pr's starterMinRequestRate, which applies inside the errors
+// template's expression regardless of Idle. A service steady at 0.9 req/s
+// -- roughly 78,000 requests a day, unambiguously real load -- was declared
+// idle under the old floor and denied a rate/latency/saturation starter
+// entirely, not just an errors one.
+func TestRequestIdleFloorDoesNotFlagRealTraffic(t *testing.T) {
+	got := RankBlindSpots([]ServiceCoverage{
+		{Service: Service{Name: "search", Traffic: 0.9, TrafficBasis: BasisRequests}},
+	})
+	if len(got) != 1 || got[0].Idle {
+		t.Errorf("search at 0.9 req/s (~78k req/day): Idle = %v, want false", got[0].Idle)
 	}
 }
 
@@ -135,6 +160,27 @@ func TestRankBlindSpotsIgnoresGlobalOnlyCoverage(t *testing.T) {
 	})
 	if len(got) != 1 || got[0].Service.Name != "search" {
 		t.Fatalf("blind spots = %+v, want search only", got)
+	}
+}
+
+// TestRankBlindSpotsDoesNotClearOnAGuessedMatch: a service whose only
+// service-scoped rule classifies uncertainly (Certain: false -- a guess,
+// not a confident read) must still be a blind spot. AnyScopedCoverage
+// previously counted ANY matched-scope match, guessed or not, as "covered",
+// which let a heuristic classification hide a real gap from the report
+// with no refusal and no row explaining why -- silently presenting a guess
+// as knowledge.
+func TestRankBlindSpotsDoesNotClearOnAGuessedMatch(t *testing.T) {
+	got := RankBlindSpots([]ServiceCoverage{
+		{Service: Service{Name: "search", Traffic: 40, TrafficBasis: BasisRequests}, Covered: map[Signal][]RuleMatch{
+			SignalErrors: {{AlertName: "SomeAmbiguousRule", Certain: false, Scope: "matched"}},
+		}},
+		{Service: Service{Name: "checkout", Traffic: 8, TrafficBasis: BasisRequests}, Covered: map[Signal][]RuleMatch{
+			SignalErrors: {{AlertName: "CheckoutErrorRateHigh", Certain: true, Scope: "matched"}},
+		}},
+	})
+	if len(got) != 1 || got[0].Service.Name != "search" {
+		t.Fatalf("blind spots = %+v, want search only (its only match is an uncertain guess)", got)
 	}
 }
 

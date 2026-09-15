@@ -57,17 +57,34 @@ const sampleIdleFloor = 2
 // comparison against peers, and it degenerates whenever the peers do not
 // vary. With exactly ONE blind spot the median IS that service's own
 // traffic, so the test reads "is x <= 0.05x" and no single blind spot is
-// ever idle. With every blind spot at the same value -- a dev cluster
-// ticking over at half a request per second each -- the median is again
-// that value and nothing is idle, so every service in it earns a
-// page-severity starter proposal on day one.
+// ever idle. With every blind spot at the same value, the median is again
+// that value and nothing is idle either. That degenerate case, and ONLY
+// that case, is what this floor exists to protect against -- so it must be
+// set at the point where traffic is genuinely negligible, not at the point
+// where a starter proposal's arithmetic gets noisy.
 //
-// One request per second is the line: below it, the five-minute windows a
-// starter rule evaluates over hold a few hundred requests at most, so a
-// single failed request moves an error ratio by a whole percentage point.
-// That is the regime where a brand-new, page-severity rule measures noise
-// rather than load, which is exactly what Idle exists to keep it away from.
-const requestIdleFloor = 1.0
+// The value that followed from that second reasoning, 1.0, was wrong for
+// exactly that reason: it was derived from "a single failed request in a
+// five-minute window moves an error ratio by a whole percentage point",
+// which is the ERROR-RATIO guard's job, not idle's -- and it already has an
+// owner. internal/pr's starterMinRequestRate (0.2 req/s) guards precisely
+// that case INSIDE the errors template's own expression (`and <rate> >
+// 0.2`), regardless of whether Idle fires at all, so idle does not need to
+// reach that threshold a second time. Left at 1.0, idle was doing that
+// job twice AND blocking latency and saturation proposals -- which have no
+// error-ratio arithmetic to protect -- for any service under it: a service
+// steady at 0.9 req/s (roughly 78,000 requests a day, unambiguously real
+// traffic) was declared idle and denied a starter on every signal, not
+// just errors.
+//
+// 0.2 req/s -- the same boundary starterMinRequestRate already draws for
+// "is there enough traffic in a 5m window to reason about at all" (60
+// requests), which is equally the answer to "is there enough traffic for
+// idle's degenerate-median case to matter": at or above it there were 360+
+// requests in probeWindow (30m) for latencyTemplate/errorsTemplate to
+// derive a threshold from, and a dev fleet ticking over at exactly this
+// rate is exactly the boundary case, not comfortably above it.
+const requestIdleFloor = 0.2
 
 // RankBlindSpots returns every service that no rule names specifically
 // (ServiceCoverage.AnyScopedCoverage() == false), ranked so a service
