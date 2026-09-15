@@ -14,7 +14,10 @@
 #                  billingMetrics exposes both.
 #   search      -- substantial traffic (the busiest, highest-cardinality
 #                  endpoint in the fixture -- see searchMetrics) and NO
-#                  rule below mentions it at all. The headline blind spot.
+#                  rule below mentions it by name. The headline blind spot:
+#                  the cluster-wide TargetDown rule sweeps it up like
+#                  everything else, which is not the same as anyone
+#                  alerting on search.
 #   batchworker -- no traffic at all (batchworkerMetrics exposes no request
 #                  metric whatsoever) and no alerts either. Coverage must
 #                  not rank this as an urgent blind spot: an idle service
@@ -24,10 +27,33 @@
 # prometheus.yml's static_configs.labels, the way Kubernetes SD would);
 # search and batchworker carry no such label and so have no rule matching
 # them by service or job either -- there being none is the point.
+#
+# TargetDown below is a fifth fixture, and the only one that is not about a
+# single service: it is the plainest global rule there is -- no scoping
+# selector, no aggregation -- and it must be attributed to EVERY discovered
+# service, with scope "global". Without a rule of this shape in the demo,
+# nothing in the stack ever exercised that attribution path: every other
+# rule here names a service, and demo.yml's scan archetypes are dropped
+# earlier still (their metric names classify as no signal at all), so the
+# suite stayed green while `up == 0` -- the single most common alerting rule
+# in existence -- was being credited to nobody.
+#
+# It is also why blind-spot ranking asks AnyScopedCoverage rather than
+# AnyCoverage: TargetDown is real coverage and the grid says so, but it
+# fires identically for every target in the cluster and tells the search
+# team nothing about whether anyone is watching search. search stays the
+# headline blind spot below with TargetDown in place, which is the whole
+# point of the distinction.
 groups:
   - name: services
     interval: 15s
     rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels: {severity: page}
+        annotations: {summary: "a scrape target has been unreachable for 5m"}
+
       - alert: CheckoutErrorRateHigh
         expr: |
           sum(rate(http_requests_total{service="checkout",code=~"5.."}[5m]))

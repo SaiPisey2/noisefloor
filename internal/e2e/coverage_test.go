@@ -50,6 +50,33 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 		byName[sc.Service.Name] = sc
 	}
 
+	// demo/prometheus/rules/coverage.yml's TargetDown (`up == 0`) is the
+	// fixture's only global rule: no scoping selector, no aggregation. It
+	// must be attributed to EVERY discovered service, with scope "global".
+	// Attributing it to none -- which is what the stack did before -- turns
+	// the most common alerting rule in existence into a cluster-wide false
+	// blind spot, and nothing else in the demo exercises this path.
+	for _, sc := range grid {
+		var found *coverage.RuleMatch
+		for i, m := range sc.Covered[coverage.SignalRate] {
+			if m.AlertName == "TargetDown" {
+				found = &sc.Covered[coverage.SignalRate][i]
+			}
+		}
+		if found == nil {
+			t.Errorf("%s: TargetDown (`up == 0`) is not attributed to this service; a global rule covers all of them",
+				sc.Service.Name)
+			continue
+		}
+		if found.Scope != "global" {
+			t.Errorf("%s: TargetDown Scope = %q, want global", sc.Service.Name, found.Scope)
+		}
+		if !found.Certain {
+			t.Errorf("%s: TargetDown must classify as rate with certainty (`up` is the standard availability metric)",
+				sc.Service.Name)
+		}
+	}
+
 	// Prometheus's own self-scrape is excluded by default (config.Coverage.
 	// ExcludeJobs) precisely because it would otherwise dominate this report
 	// -- it must not appear at all, and Run must say it was left out.
@@ -86,9 +113,16 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 	if !billing.Covers(coverage.SignalSaturation) {
 		t.Error("shop/billing: expected saturation coverage")
 	}
-	for _, sig := range []coverage.Signal{coverage.SignalRate, coverage.SignalErrors, coverage.SignalLatency} {
+	// Saturation-only as far as rules NAMING billing go; rate is covered
+	// only by the cluster-wide TargetDown, asserted above.
+	for _, sig := range []coverage.Signal{coverage.SignalErrors, coverage.SignalLatency} {
 		if billing.Covers(sig) {
 			t.Errorf("shop/billing: unexpected coverage on %s (should be saturation-only)", sig)
+		}
+	}
+	for _, m := range billing.Covered[coverage.SignalRate] {
+		if m.Scope == "matched" {
+			t.Errorf("shop/billing: unexpected service-scoped rate rule %q (should be saturation-only)", m.AlertName)
 		}
 	}
 
@@ -99,8 +133,8 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 	if search.Service.Source != "job" {
 		t.Errorf("search Source = %q, want job (no SD labels)", search.Service.Source)
 	}
-	if search.AnyCoverage() {
-		t.Error("search: expected zero coverage, it is the headline blind spot")
+	if search.AnyScopedCoverage() {
+		t.Error("search: expected no rule to name it, it is the headline blind spot")
 	}
 	if search.Service.TrafficBasis != coverage.BasisRequests {
 		t.Errorf("search TrafficBasis = %q, want %q (it exposes http_requests_total)",
@@ -111,8 +145,8 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 	if !ok {
 		t.Fatal("batchworker not discovered")
 	}
-	if batchworker.AnyCoverage() {
-		t.Error("batchworker: expected zero coverage")
+	if batchworker.AnyScopedCoverage() {
+		t.Error("batchworker: expected no rule to name it")
 	}
 	if batchworker.Service.TrafficBasis != coverage.BasisSamples {
 		t.Errorf("batchworker TrafficBasis = %q, want %q (no request counter exposed)",
