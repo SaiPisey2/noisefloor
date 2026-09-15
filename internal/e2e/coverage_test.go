@@ -36,17 +36,34 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 		t.Fatalf("prom client: %v", err)
 	}
 
-	grid, parseErrors, err := coverage.Run(ctx, api, cfg, time.Now().UTC())
+	result, err := coverage.Run(ctx, api, cfg, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("coverage.Run, is the demo stack up: %v", err)
 	}
-	if len(parseErrors) != 0 {
-		t.Fatalf("unexpected parse errors: %v", parseErrors)
+	if len(result.ParseErrors) != 0 {
+		t.Fatalf("unexpected parse errors: %v", result.ParseErrors)
 	}
+	grid := result.Grid
 
 	byName := map[string]coverage.ServiceCoverage{}
 	for _, sc := range grid {
 		byName[sc.Service.Name] = sc
+	}
+
+	// Prometheus's own self-scrape is excluded by default (config.Coverage.
+	// ExcludeJobs) precisely because it would otherwise dominate this report
+	// -- it must not appear at all, and Run must say it was left out.
+	if _, ok := byName["prometheus"]; ok {
+		t.Error("prometheus: expected to be excluded by default, found in the grid")
+	}
+	foundExcluded := false
+	for _, j := range result.ExcludedJobs {
+		if j == "prometheus" {
+			foundExcluded = true
+		}
+	}
+	if !foundExcluded {
+		t.Errorf("ExcludedJobs = %v, want \"prometheus\" present", result.ExcludedJobs)
 	}
 
 	checkout, ok := byName["shop/checkout"]
@@ -85,6 +102,10 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 	if search.AnyCoverage() {
 		t.Error("search: expected zero coverage, it is the headline blind spot")
 	}
+	if search.Service.TrafficBasis != coverage.BasisRequests {
+		t.Errorf("search TrafficBasis = %q, want %q (it exposes http_requests_total)",
+			search.Service.TrafficBasis, coverage.BasisRequests)
+	}
 
 	batchworker, ok := byName["batchworker"]
 	if !ok {
@@ -92,6 +113,10 @@ func TestCoverageReachesExpectedGrid(t *testing.T) {
 	}
 	if batchworker.AnyCoverage() {
 		t.Error("batchworker: expected zero coverage")
+	}
+	if batchworker.Service.TrafficBasis != coverage.BasisSamples {
+		t.Errorf("batchworker TrafficBasis = %q, want %q (no request counter exposed)",
+			batchworker.Service.TrafficBasis, coverage.BasisSamples)
 	}
 
 	blind := coverage.RankBlindSpots(grid)

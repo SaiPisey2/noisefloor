@@ -25,19 +25,30 @@
 //
 // # Traffic proxy
 //
-// Ranking blind spots needs a notion of "how much does this service matter",
-// and request-rate metrics are not available for every kind of workload (a
-// batch job, a database, a cache have no http_requests_total to point at).
-// What every scraped target has, regardless of what it exports, is a sample
-// count: Prometheus records `scrape_samples_scraped` for every target on
-// every scrape. This package uses that series' average value over the
-// window as the traffic proxy. It is deliberately not a measurement of
-// request rate -- it is a measurement of how much a target has to say for
-// itself, which a service under real load and real instrumentation
-// (multiple endpoints, methods, status codes, a latency histogram) produces
-// far more of than an idle or minimally-instrumented one. See
-// docs/noisefloor-design.md's Coverage section, where this proxy is
-// specified.
+// Ranking blind spots needs a notion of "how much does this service
+// matter", and the honest answer has two tiers, not one.
+//
+// The good case: a service that exposes a recognised request/operation
+// counter (RequestCounters -- http_requests_total and similar) is measured
+// by its actual summed rate, in requests per second. That is a real
+// throughput number and the preferred basis whenever it exists.
+//
+// Not every workload has one -- a batch job, a database, a cache have no
+// http_requests_total to point at. For those, this package falls back to a
+// sample count: Prometheus records `scrape_samples_scraped` for every
+// target on every scrape, regardless of what it exports, and a service
+// under real load and real instrumentation (multiple endpoints, methods,
+// status codes, a latency histogram) produces far more of it than an idle
+// or minimally-instrumented one. It is deliberately not a measurement of
+// request rate -- an early version of this package used it as the ONLY
+// proxy and it ranked Prometheus's own self-scrape (hundreds of internal
+// metrics) above every real application service, which is a unit error,
+// not a finding.
+//
+// The two bases are not comparable numbers, so every traffic reading
+// carries which one it is (Service.TrafficBasis) and RankBlindSpots ranks
+// within one basis at a time rather than ever sorting them against each
+// other directly. See BuildTrafficProxies and RankBlindSpots.
 package coverage
 
 // Signal is one of the five things a rule can be alerting on, for the
@@ -84,12 +95,17 @@ type Service struct {
 	// scraped and currently down, both read false here; Source tells them
 	// apart.
 	Up bool
-	// Traffic is the raw traffic-proxy value (see package doc): the
-	// average `scrape_samples_scraped` over the query window, summed
-	// across every target contributing to this service. Only meaningful
-	// relative to other services in the same run -- it is not a rate, a
-	// percentage, or comparable across runs with a different window.
+	// Traffic is the raw traffic-proxy value (see package doc and
+	// BuildTrafficProxies): a real throughput reading when this service
+	// exposes a recognised request/operation counter, else a fallback
+	// sample-volume reading. Only meaningful relative to another Traffic
+	// value with the SAME TrafficBasis -- it is not a rate on its own, and
+	// req/s and scrape-sample counts must never be compared directly.
 	Traffic float64
+	// TrafficBasis is the unit Traffic was measured in: BasisRequests or
+	// BasisSamples. Empty when no traffic data was available at all (e.g.
+	// a Service named only via explicit config, never observed in `up`).
+	TrafficBasis string
 }
 
 // RuleMatch is one rule attributed to one service for one signal.

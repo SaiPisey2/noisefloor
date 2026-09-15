@@ -16,16 +16,19 @@
 //	               the most common real shape (a team notices resource
 //	               pressure and alerts on it, and never gets round to
 //	               error rate or latency). Also namespace=shop.
-//	search      -- the busiest endpoint here (most method/status-code
-//	               label combinations, and correspondingly the highest
-//	               scrape_samples_scraped -- see internal/coverage's
-//	               traffic-proxy doc comment), and NO rule mentions it at
-//	               all. The headline blind spot. No SD labels: discovered
-//	               by job alone, exercising that fallback path.
+//	search      -- the busiest endpoint here (highest http_requests_total
+//	               rate, and the most method/status-code label
+//	               combinations), and NO rule mentions it at all. The
+//	               headline blind spot, measured by real request throughput
+//	               -- see internal/coverage's traffic-proxy doc comment. No
+//	               SD labels: discovered by job alone, exercising that
+//	               fallback path.
 //	batchworker -- exposes almost nothing (one gauge, no request metric
-//	               at all): no traffic and no alerts. Coverage must not
-//	               rank this as an urgent blind spot -- an idle service
-//	               alerting on nothing is not a risk. No SD labels.
+//	               at all): no traffic and no alerts. With no request
+//	               counter to measure, its traffic proxy falls back to
+//	               scrape_samples_scraped, where it is correctly the
+//	               smallest thing discovered -- coverage must not rank it
+//	               as an urgent blind spot. No SD labels.
 package main
 
 import (
@@ -144,10 +147,12 @@ func searchMetrics(w http.ResponseWriter, _ *http.Request) {
 
 // batchworkerMetrics is deliberately almost nothing: no request counter at
 // all, because this is not a request-driven service, and no alert rule
-// mentions it either. Its traffic-proxy value (scrape_samples_scraped)
-// stays near zero because there is almost nothing here to scrape, which is
-// what correctly keeps it out of the urgent blind-spot ranking -- see
-// internal/coverage.RankBlindSpots's idleFraction.
+// mentions it either. With no recognised request/operation counter to
+// measure (internal/coverage.RequestCounters), its traffic proxy falls
+// back to scrape_samples_scraped, which stays near zero because there is
+// almost nothing here to scrape -- correctly keeping it out of the urgent
+// blind-spot ranking. See internal/coverage.RankBlindSpots's idleFraction
+// and sampleIdleFloor.
 func batchworkerMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE process_resident_memory_bytes gauge")
 	fmt.Fprintf(w, "process_resident_memory_bytes %g\n", 5e7)

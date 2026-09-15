@@ -38,6 +38,17 @@ type Coverage struct {
 	// `up` plus namespace/service SD labels covers the common case with no
 	// configuration at all.
 	Services []string `yaml:"services"`
+
+	// ExcludeJobs names job values to drop from coverage discovery
+	// entirely -- not shown in the grid or the blind-spot list at all.
+	// Defaults to ["prometheus"]: Prometheus's own self-scrape job is
+	// present in essentially every install, and would otherwise be the
+	// top line of nearly every coverage report purely because it exposes a
+	// lot of internal metrics -- crowding out the application-level gaps
+	// this command exists to surface, in the position that should carry
+	// the most signal. "Nobody alerts on our own Prometheus" is still a
+	// legitimate finding some teams want; set this to [] to see it.
+	ExcludeJobs []string `yaml:"exclude_jobs"`
 }
 
 type Prometheus struct {
@@ -139,6 +150,9 @@ func Default() Config {
 		},
 		Rules: Rules{
 			MaxDeactivatedFraction: 0.2,
+		},
+		Coverage: Coverage{
+			ExcludeJobs: []string{"prometheus"},
 		},
 	}
 }

@@ -41,6 +41,39 @@ func TestRankBlindSpots(t *testing.T) {
 	}
 }
 
+// TestRankBlindSpotsRanksWithinBasisNotAcross reproduces the exact bug
+// found verifying this package against the live demo: a service measured
+// in requests/second must never be outranked by one measured only in
+// scrape-sample volume, however large that sample count is -- Prometheus's
+// own self-scrape routinely dwarfs any real request-rate number, and the
+// two are not the same unit.
+func TestRankBlindSpotsRanksWithinBasisNotAcross(t *testing.T) {
+	grid := []ServiceCoverage{
+		{Service: Service{Name: "search", Traffic: 2.91, TrafficBasis: BasisRequests}},
+		{Service: Service{Name: "prometheus", Traffic: 793, TrafficBasis: BasisSamples}},
+		{Service: Service{Name: "billing", Traffic: 0.39, TrafficBasis: BasisRequests}},
+		{Service: Service{Name: "batchworker", Traffic: 1, TrafficBasis: BasisSamples}},
+	}
+
+	got := RankBlindSpots(grid)
+	if len(got) != 4 {
+		t.Fatalf("got %d blind spots, want 4", len(got))
+	}
+
+	var names []string
+	for _, b := range got {
+		names = append(names, b.Service.Name)
+	}
+	// Every BasisRequests entry (real throughput) must precede every
+	// BasisSamples entry, regardless of the raw numbers.
+	want := []string{"search", "billing", "prometheus", "batchworker"}
+	for i, name := range want {
+		if names[i] != name {
+			t.Fatalf("blind spot order = %v, want %v (requests-basis before samples-basis)", names, want)
+		}
+	}
+}
+
 func TestRankBlindSpotsAllIdleWhenNoTraffic(t *testing.T) {
 	grid := []ServiceCoverage{
 		{Service: Service{Name: "a", Traffic: 0}},

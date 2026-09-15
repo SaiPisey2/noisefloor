@@ -14,7 +14,9 @@ import (
 // not ALERTS history) -- folding it into the fourteen-column scan table
 // would answer neither question well. See cmd/noisefloor's `coverage`
 // subcommand.
-func Render(w io.Writer, grid []ServiceCoverage, parseErrors map[string]error) error {
+func Render(w io.Writer, result Result) error {
+	grid, parseErrors := result.Grid, result.ParseErrors
+
 	k8s, jobOnly, configOnly := 0, 0, 0
 	for _, sc := range grid {
 		switch sc.Service.Source {
@@ -28,6 +30,13 @@ func Render(w io.Writer, grid []ServiceCoverage, parseErrors map[string]error) e
 	}
 	fmt.Fprintf(w, "Services   %d discovered (%d via Kubernetes SD labels, %d via job, %d from config only)\n",
 		len(grid), k8s, jobOnly, configOnly)
+
+	if len(result.ExcludedJobs) > 0 {
+		sorted := append([]string(nil), result.ExcludedJobs...)
+		sort.Strings(sorted)
+		fmt.Fprintf(w, "Excluded   job(s) %s dropped via coverage.exclude_jobs -- not shown below; "+
+			"set exclude_jobs: [] to include them\n", sorted)
+	}
 
 	if len(parseErrors) > 0 {
 		fmt.Fprintf(w, "Unparsable %d rule(s) could not be parsed and are excluded from coverage:\n", len(parseErrors))
@@ -78,21 +87,36 @@ func Render(w io.Writer, grid []ServiceCoverage, parseErrors map[string]error) e
 	fmt.Fprintln(w, "\nv = covered, v? = covered but the classification is a guess, - = no alert covers this signal")
 
 	blind := RankBlindSpots(grid)
-	fmt.Fprintln(w, "\nBlind spots, ranked by traffic (idle services are not ranked as urgent):")
+	fmt.Fprintln(w, "\nBlind spots, ranked by traffic within each basis (req/s ranked above scrape-sample")
+	fmt.Fprintln(w, "counts -- the two are not comparable; idle services are not ranked as urgent):")
 	if len(blind) == 0 {
 		fmt.Fprintln(w, "  none")
 		return nil
 	}
 	btw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(btw, "SERVICE\tTRAFFIC\tSTATUS")
+	fmt.Fprintln(btw, "SERVICE\tTRAFFIC\tBASIS\tSTATUS")
 	for _, b := range blind {
 		status := "no alert coverage at all"
 		if b.Idle {
 			status = "no alert coverage -- idle, not ranked as urgent"
 		}
-		fmt.Fprintf(btw, "%s\t%.0f\t%s\n", b.Service.Name, b.Service.Traffic, status)
+		basis := b.Service.TrafficBasis
+		if basis == "" {
+			basis = "n/a"
+		}
+		fmt.Fprintf(btw, "%s\t%s\t%s\t%s\n", b.Service.Name, formatTraffic(b.Service), basis, status)
 	}
 	return btw.Flush()
+}
+
+// formatTraffic renders a traffic value at a precision appropriate to its
+// basis: request rates are small, fractional numbers worth two decimal
+// places; sample-volume counts are integers.
+func formatTraffic(s Service) string {
+	if s.TrafficBasis == BasisRequests {
+		return fmt.Sprintf("%.2f", s.Traffic)
+	}
+	return fmt.Sprintf("%.0f", s.Traffic)
 }
 
 // RenderDetail prints, per service and signal, every rule matched onto it

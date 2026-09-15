@@ -95,6 +95,7 @@ rules:
 # without any of this being set.
 # coverage:
 #   services: [checkout, billing]   # include even if up{} doesn't name them
+#   exclude_jobs: [prometheus]      # default; set to [] to see Prometheus's own gap
 `
 
 func main() {
@@ -330,17 +331,17 @@ func runCoverage(args []string) error {
 	}
 
 	now := time.Now().UTC()
-	grid, parseErrors, err := coverage.Run(ctx, api, cfg, now)
+	result, err := coverage.Run(ctx, api, cfg, now)
 	if err != nil {
 		return err
 	}
 
-	if err := coverage.Render(os.Stdout, grid, parseErrors); err != nil {
+	if err := coverage.Render(os.Stdout, result); err != nil {
 		return err
 	}
 	if *detail {
 		fmt.Println()
-		return coverage.RenderDetail(os.Stdout, grid)
+		return coverage.RenderDetail(os.Stdout, result.Grid)
 	}
 	return nil
 }
