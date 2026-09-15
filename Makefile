@@ -51,3 +51,10 @@ demo-seed:
 		sh -c 'cp -r /src/* /dst/'
 	docker-compose -f demo/docker-compose.yml start prometheus
 	@echo "seeded 30d of ALERTS history (previous history discarded)"
+
+.PHONY: demo-gif
+
+# Re-record the README demo. Needs the demo stack up and seeded first, plus
+# asciinema, agg, ffmpeg and Chrome.
+demo-gif:
+	./demo/record.sh

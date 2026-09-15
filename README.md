@@ -6,6 +6,11 @@ the rules that page people for nothing.
 Most alert tooling suppresses noise after it is generated. noisefloor looks at
 the rule that generated it.
 
+![Scoring the demo stack's rules, proposing fixes, then the same results in the browser](.github/assets/demo.gif)
+
+Every frame above is real output from the demo stack below -- scan, coverage,
+a `for:` proposal, a starter rule for a blind spot, and `noisefloor serve`.
+
 ## How it works
 
 Alertmanager keeps no history, which is why most tools ask you to install a
@@ -227,6 +232,9 @@ make demo-up
 make demo-seed
 make build && ./noisefloor scan
 ```
+
+`make demo-gif` re-records the README demo against that stack; it needs
+asciinema, agg, ffmpeg and Chrome.
 
 Brings up Prometheus, Alertmanager and a service that emits deliberately noisy
 and deliberately healthy alerts, then seeds 30 days of history.
