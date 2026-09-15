@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,17 @@ var schemaSQL string
 
 type SQLite struct{ db *sql.DB }
 
+// maxOpenConns bounds how many concurrent connections one SQLite handle
+// hands out. This is a read-only reporting server behind no queue of its
+// own: without a cap, a burst of concurrent requests (twenty browser tabs
+// hitting a flapping rule's detail page, say) opens a connection each,
+// and modernc.org/sqlite serializes writers underneath -- readers pile up
+// waiting on the OS file descriptor table long before they'd ever wait on
+// SQLite itself. A small, fixed pool makes that queueing happen inside
+// database/sql (bounded, fair) instead of as unbounded goroutines and file
+// descriptors pinned on the far side of a slow query.
+const maxOpenConns = 10
+
 func Open(path string) (*SQLite, error) {
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)",
@@ -26,6 +39,7 @@ func Open(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -384,18 +398,233 @@ FROM rules WHERE id = ?`
 	return r, true, nil
 }
 
-// ListEpisodesForRule returns every episode ever reconstructed for one
-// rule, oldest first -- the whole history the episode timeline renders, not
-// just one scan window's worth. A rule that has fired a few thousand times
-// (see DemoFlapping in the demo fixture) still fits comfortably in memory;
-// this is a read-only reporting server, not a paging API.
-func (s *SQLite) ListEpisodesForRule(ctx context.Context, ruleID int64) ([]Episode, error) {
-	q := `SELECT ` + episodeCols + ` FROM episodes WHERE rule_id = ? ORDER BY started_at`
-	rows, err := s.db.QueryContext(ctx, q, ruleID)
+// MaxEpisodesPerPage is the hard ceiling on how many episode rows any
+// single ListEpisodesForRule call returns, regardless of what limit a
+// caller (ultimately, a `?limit=` query parameter on the JSON API) asks
+// for. A rule flapping every ten minutes for a year is on the order of
+// 50,000 episodes; without a ceiling here, a caller who mistypes or
+// deliberately passes a huge limit still forces one query to materialize
+// all of them.
+const MaxEpisodesPerPage = 2000
+
+// DefaultEpisodesPerPage is what ListEpisodesForRule uses when the caller
+// asks for no limit at all (limit <= 0).
+const DefaultEpisodesPerPage = 200
+
+// CountEpisodesForRule returns exactly how many episodes exist for ruleID,
+// independent of any page size -- what a paginated caller (the JSON API,
+// the HTML page's "showing the most recent N of M" note) needs to state
+// how much history a bounded page actually represents.
+func (s *SQLite) CountEpisodesForRule(ctx context.Context, ruleID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM episodes WHERE rule_id = ?`, ruleID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count episodes for rule %d: %w", ruleID, err)
+	}
+	return n, nil
+}
+
+// ListEpisodesForRule returns one page of episodes for ruleID, most recent
+// first, bounded by limit (clamped to (0, MaxEpisodesPerPage], defaulting
+// to DefaultEpisodesPerPage when limit <= 0) and offset. Unlike the
+// unbounded query this replaces, this always allocates O(limit), never
+// O(total episodes) -- see MaxEpisodesPerPage's doc comment for why that
+// matters. Use CountEpisodesForRule for the total a caller needs to page
+// through or to report as "showing N of M".
+func (s *SQLite) ListEpisodesForRule(ctx context.Context, ruleID int64, limit, offset int) ([]Episode, error) {
+	if limit <= 0 {
+		limit = DefaultEpisodesPerPage
+	}
+	if limit > MaxEpisodesPerPage {
+		limit = MaxEpisodesPerPage
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	q := `SELECT ` + episodeCols + ` FROM episodes WHERE rule_id = ?
+	      ORDER BY started_at DESC LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, q, ruleID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list episodes for rule %d: %w", ruleID, err)
 	}
 	return s.scanEpisodes(rows)
+}
+
+// MaxWindowEpisodes bounds ListFiringEpisodesForRuleInWindow: a flapping
+// rule can accumulate tens of thousands of episodes inside a single
+// thirty-day scan window, not just over its whole history, so the window
+// filter alone does not bound memory on its own. This one is deliberately
+// much smaller than MaxWindowDurations (below): every row here comes back
+// as a full Episode, labels map and all (collect.CoveringSilences needs
+// the labels to match a silence's matchers against), and that
+// per-row JSON decode is the expensive part -- a covering-silence check
+// beyond a couple thousand episodes is already deep into "this rule needs
+// fixing, not a more complete silence list" territory.
+const MaxWindowEpisodes = 2000
+
+// ListFiringEpisodesForRuleInWindow returns ruleID's FIRING episodes whose
+// start falls in [from, to), oldest first, capped at MaxWindowEpisodes.
+// This is the window a stored score was actually computed over -- the
+// same set internal/scanner builds RuleEval.Durations from (see
+// ListEpisodesInWindow) -- so a consumer matching silences against this
+// call's result sees the same evidence a `noisefloor remediate` proposal
+// for the same rule would have, not this rule's entire history the way
+// ListEpisodesForRule does. For the counterfactual's duration list, use
+// the cheaper ListFiringDurationsForRuleInWindow instead: it does not need
+// labels, and its cap is much higher because of that.
+func (s *SQLite) ListFiringEpisodesForRuleInWindow(ctx context.Context, ruleID int64, from, to time.Time) ([]Episode, error) {
+	q := `SELECT ` + episodeCols + ` FROM episodes
+	      WHERE rule_id = ? AND state = ? AND started_at >= ? AND started_at < ?
+	      ORDER BY started_at LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(from), unix(to), MaxWindowEpisodes)
+	if err != nil {
+		return nil, fmt.Errorf("list firing episodes for rule %d in window: %w", ruleID, err)
+	}
+	return s.scanEpisodes(rows)
+}
+
+// MaxWindowDurations bounds ListFiringDurationsForRuleInWindow. Each row
+// here costs two int64 scans and one subtraction -- no labels, no
+// fingerprint, no per-row JSON decode -- so this affords a cap two orders
+// of magnitude above MaxWindowEpisodes for roughly the same worst-case
+// allocation.
+const MaxWindowDurations = 50000
+
+// ListFiringDurationsForRuleInWindow returns just the firing DURATIONS
+// (ended_at - started_at) for ruleID's episodes whose start falls in
+// [from, to), oldest first, capped at MaxWindowDurations. This is the
+// cheap path for a consumer -- the rule-detail page's counterfactual --
+// that only needs the numbers remediate.Compute wants, not a full
+// Episode: on a window with tens of thousands of episodes, this allocates
+// a small fraction of what ListFiringEpisodesForRuleInWindow would for
+// the same rows, because there is no labels map to deserialize per row.
+func (s *SQLite) ListFiringDurationsForRuleInWindow(ctx context.Context, ruleID int64, from, to time.Time) ([]time.Duration, error) {
+	q := `SELECT started_at, ended_at FROM episodes
+	      WHERE rule_id = ? AND state = ? AND started_at >= ? AND started_at < ?
+	      ORDER BY started_at LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, ruleID, StateFiring, unix(from), unix(to), MaxWindowDurations)
+	if err != nil {
+		return nil, fmt.Errorf("list firing durations for rule %d in window: %w", ruleID, err)
+	}
+	defer rows.Close()
+
+	var out []time.Duration
+	for rows.Next() {
+		var start, end int64
+		if err := rows.Scan(&start, &end); err != nil {
+			return nil, fmt.Errorf("scan firing duration for rule %d: %w", ruleID, err)
+		}
+		out = append(out, fromUnix(end).Sub(fromUnix(start)))
+	}
+	return out, rows.Err()
+}
+
+// EpisodeBucket is one fixed-width time bucket of a rule's episode
+// history: how many firing and how many pending episodes started inside
+// it. See EpisodeTimelineSummary.
+type EpisodeBucket struct {
+	Index   int
+	Firing  int
+	Pending int
+}
+
+// MaxTimelineEpisodes is the episode count above which the rule-detail
+// page's timeline switches from drawing one bar per episode to the
+// bucketed summary EpisodeTimelineSummary computes. Past this many
+// episodes, one-rect-per-episode stops being readable anyway (it is well
+// beyond the viewBox's pixel width) before it becomes a memory problem --
+// bucketing is a readability fix that happens to also bound allocation.
+const MaxTimelineEpisodes = 500
+
+// TimelineBuckets is how many buckets EpisodeTimelineSummary divides a
+// rule's history into. Comfortably above the viewBox's rendered width in
+// typical browser zoom levels, so the bucketed view still reads as a
+// texture rather than a bar chart.
+const TimelineBuckets = 300
+
+// EpisodeTimelineSummary reduces one rule's entire episode history to at
+// most numBuckets fixed-width time buckets, computed inside SQL with two
+// aggregate queries rather than by fetching every row: this allocates
+// O(numBuckets), never O(episode count), so a rule with fifty thousand
+// episodes costs the same as one with a dozen.
+//
+// windowStart is the earliest episode's start; windowEnd is the later of
+// the last episode's end or now, so a still-firing episode's bucket
+// reaches the present -- the same convention newTimeline uses for the
+// exact (unbucketed) rendering. bucketWidth is (windowEnd-windowStart)
+// divided across numBuckets, rounded up to a whole second. total is the
+// exact episode count (a plain COUNT(*), not itself bounded), so a caller
+// can state precisely how much history one bucketed picture summarizes.
+// total == 0 (with every other return zero-valued) means the rule has no
+// episodes at all.
+func (s *SQLite) EpisodeTimelineSummary(ctx context.Context, ruleID int64, now time.Time, numBuckets int) (buckets []EpisodeBucket, bucketWidth time.Duration, windowStart, windowEnd time.Time, total int, err error) {
+	var minStart, maxEnd sql.NullInt64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT MIN(started_at), MAX(ended_at), COUNT(*) FROM episodes WHERE rule_id = ?`,
+		ruleID).Scan(&minStart, &maxEnd, &total)
+	if err != nil {
+		return nil, 0, time.Time{}, time.Time{}, 0, fmt.Errorf("episode timeline bounds for rule %d: %w", ruleID, err)
+	}
+	if total == 0 {
+		return nil, 0, time.Time{}, time.Time{}, 0, nil
+	}
+
+	windowStart = fromUnix(minStart.Int64)
+	windowEnd = fromUnix(maxEnd.Int64)
+	if now.After(windowEnd) {
+		windowEnd = now
+	}
+	span := windowEnd.Sub(windowStart)
+	if span <= 0 {
+		span = time.Second
+	}
+	if numBuckets < 1 {
+		numBuckets = 1
+	}
+	bucketWidth = time.Duration(math.Ceil(span.Seconds()/float64(numBuckets))) * time.Second
+	if bucketWidth <= 0 {
+		bucketWidth = time.Second
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT CAST((started_at - ?) / ? AS INTEGER) AS bucket, state, COUNT(*)
+		 FROM episodes WHERE rule_id = ? GROUP BY bucket, state`,
+		unix(windowStart), int64(bucketWidth.Seconds()), ruleID)
+	if err != nil {
+		return nil, 0, time.Time{}, time.Time{}, 0, fmt.Errorf("episode timeline buckets for rule %d: %w", ruleID, err)
+	}
+	defer rows.Close()
+
+	byIdx := map[int]*EpisodeBucket{}
+	for rows.Next() {
+		var idx int
+		var state string
+		var n int
+		if err := rows.Scan(&idx, &state, &n); err != nil {
+			return nil, 0, time.Time{}, time.Time{}, 0, fmt.Errorf("scan episode timeline bucket: %w", err)
+		}
+		b, ok := byIdx[idx]
+		if !ok {
+			b = &EpisodeBucket{Index: idx}
+			byIdx[idx] = b
+		}
+		if state == StateFiring {
+			b.Firing += n
+		} else {
+			b.Pending += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, time.Time{}, time.Time{}, 0, err
+	}
+
+	buckets = make([]EpisodeBucket, 0, len(byIdx))
+	for _, b := range byIdx {
+		buckets = append(buckets, *b)
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Index < buckets[j].Index })
+	return buckets, bucketWidth, windowStart, windowEnd, total, nil
 }
 
 func (s *SQLite) scanScores(rows *sql.Rows) ([]Score, error) {
