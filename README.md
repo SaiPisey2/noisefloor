@@ -358,13 +358,30 @@ carrying real load with zero alerting sorts at the top. `-detail` shows the
 rule and reasoning behind every cell, including which classifications are
 a confident read versus a guess (`v?`).
 
+**A blind spot is a service no rule names.** A rule that scopes itself to a
+service (`{service="checkout"}`, `{job="search"}`, a namespace regexp that
+resolves) is credited to that service specifically; a rule that scopes
+itself to nothing and spans the whole cluster (`up == 0`, `sum by (job)
+(...)`) is credited to every service, marked `global` under `-detail`, and
+counted in the grid. Only the first kind clears a service off the
+blind-spot list: a cluster-wide target-down rule is real alerting, but it
+fires identically for every target and says nothing about whether anyone is
+watching *your* service.
+
+Two things the report will not do quietly. A rule that parsed and
+classified but names no service discovered here -- one scoped to an
+exporter job, or to a service this Prometheus does not scrape -- is
+reported by name under `Unattributed`, because it renders as the same `-`
+a genuine gap does and the two are not the same finding. A rule that failed
+to parse is reported the same way under `Unparsable`.
+
 ## Propose starter rules for blind spots
 
 Finding a blind spot is not fixing it. `noisefloor propose` closes that
-gap for a service with **no alert coverage at all**: it opens one pull
-request per service, adding a single starter rule for the most
-fundamental missing signal, reusing the exact same PR machinery
-`remediate` does (branch, diff, body, dry run, idempotence).
+gap for a service **no rule names**: it opens one pull request per service,
+adding a single starter rule for the most fundamental missing signal,
+reusing the exact same PR machinery `remediate` does (branch, diff, body,
+dry run, idempotence).
 
 ```
 noisefloor propose -config noisefloor.yaml
@@ -382,11 +399,37 @@ an error ratio, a resident-memory reading), the threshold is scaled from
 that real number and the body says so and shows the arithmetic; otherwise
 it falls back to a fixed, deliberately loose default and says that too.
 
+Every derived threshold is bounded at both ends. A floor keeps a
+brand-new rule from pinning itself to a currently-flawless service; a
+ceiling keeps it from pinning itself to a currently-broken one. Three times
+an incident-time error ratio of 0.45 is `> 1.35`, which a ratio can never
+reach: a `severity: page` rule that cannot fire, presented as coverage.
+When a cap binds, the body stops calling the number measured and says the
+reading was too high to calibrate against. Readings that are not numbers at
+all (`histogram_quantile` returns `+Inf` for a quantile landing in the
+`+Inf` bucket) are discarded and the fixed default used instead.
+
 Four templates, one per signal noisefloor can hand-author a rule for
 (`rate`, `errors`, `latency`, `saturation` -- `burn_rate` rules are
 generator output, not something to propose): "traffic disappeared"
 (`absent()`, no threshold to guess at all), error ratio, p99 latency, and
-resident memory. Each only ever names a metric the service was confirmed,
+resident memory.
+
+The error-ratio rule carries a minimum-traffic guard in the expression
+itself, because a ratio over a small denominator is arithmetic on single
+events: one 500 in a five-minute window that carried one request is a ratio
+of 1.0, and `for: 10m, severity: page` then wakes somebody for it.
+
+The `absent()` rule is refused for any service whose request series has
+actually gone absent in the last 24 hours. A workload that scales to zero
+overnight -- KEDA, a scaled-down deployment, a nightly batch -- is supposed
+to have no traffic some of the time, and this is the DEFAULT proposal, so
+it was the first thing noisefloor offered such a team: a page every night.
+The refusal is measured rather than guessed (the template is declined
+exactly where the data says it would already have fired), and propose moves
+on to the next signal for that service.
+
+Each template only ever names a metric the service was confirmed,
 by an instant Prometheus query, to actually expose -- verified again after
 the fact by running the generated expression back through coverage's own
 classifier and checking it lands on the intended signal. Priority order is
@@ -412,10 +455,20 @@ answer turns into a PR that does not apply cleanly. Instead:
   refusal) and the operator is asked to nominate one.
 
 **Refusals**, reported the same way remediate's are: an idle service (see
-coverage's own idle threshold), a signal the service has no recognised
-metric for, existing coverage on the signal that is a guess rather than
-certain (propose will not stack a second rule on an unverified reading),
-and an unresolvable target.
+coverage's own idle threshold -- both relative to its peers and against an
+absolute floor, since a lone blind spot and an all-equal cluster both
+defeat a purely relative test), a signal the service has no recognised
+metric for, a service whose traffic legitimately stops (the `absent()`
+guard above), existing coverage on the signal that is a guess rather than
+certain (propose will not stack a second rule on an unverified reading), an
+unresolvable target, and a template whose own output coverage would not
+classify back as the signal it was built for.
+
+Every one of those is a refusal for **one service**, never an error that
+ends the run. A fleet has services on conventions no template covers, and
+stopping at the first one -- after earlier services' PRs were already
+opened -- leaves a partial result that explains neither where it stopped
+nor why.
 
 **Dry run by default**, exactly like `remediate`.
 
