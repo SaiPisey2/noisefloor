@@ -69,6 +69,17 @@ const (
 	statusResolved = "resolved"
 )
 
+// MaxFutureSkew bounds how far into the future startsAt/endsAt may sit
+// relative to this process's own clock. Validate already catches
+// end-before-start and zero timestamps, but neither catches a timestamp
+// that is simply wrong in the other direction: a resolved alert with
+// endsAt in year 9999 passes both and writes an eight-thousand-year
+// episode that poisons P50Duration and can hand a rule automate. Generous
+// enough to absorb ordinary clock drift between Alertmanager and the
+// collector, far too small for anything a real notification would ever
+// send.
+const MaxFutureSkew = 24 * time.Hour
+
 // Validate rejects a payload noisefloor should not act on at all: wrong
 // shape, missing required fields, or sizes far outside anything a real
 // Alertmanager notification would ever send. It does not mutate p.
@@ -121,6 +132,11 @@ func (a Alert) validate() error {
 	if a.StartsAt.IsZero() {
 		return fmt.Errorf("startsAt is required")
 	}
+	maxFuture := time.Now().Add(MaxFutureSkew)
+	if a.StartsAt.After(maxFuture) {
+		return fmt.Errorf("startsAt (%s) is more than %s in the future",
+			a.StartsAt.Format(time.RFC3339), MaxFutureSkew)
+	}
 	if a.Status == statusResolved {
 		if a.EndsAt.IsZero() {
 			return fmt.Errorf("endsAt is required for a resolved alert")
@@ -128,6 +144,10 @@ func (a Alert) validate() error {
 		if a.EndsAt.Before(a.StartsAt) {
 			return fmt.Errorf("endsAt (%s) is before startsAt (%s)",
 				a.EndsAt.Format(time.RFC3339), a.StartsAt.Format(time.RFC3339))
+		}
+		if a.EndsAt.After(maxFuture) {
+			return fmt.Errorf("endsAt (%s) is more than %s in the future",
+				a.EndsAt.Format(time.RFC3339), MaxFutureSkew)
 		}
 	}
 	if err := validateLabelMap("labels", a.Labels); err != nil {

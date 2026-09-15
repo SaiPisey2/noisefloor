@@ -115,6 +115,55 @@ func TestValidateAlertRejectsEndsAtBeforeStartsAt(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsFarFutureStartsAt is finding 6: Validate bounds
+// end-before-start and zero timestamps but nothing bounds the future. A
+// resolved alert with endsAt in year 9999 was accepted, writing an
+// eight-thousand-year episode that poisons P50Duration and can hand a
+// rule automate.
+func TestValidateRejectsFarFutureStartsAt(t *testing.T) {
+	p := Payload{
+		Status: statusFiring, Receiver: "r",
+		Alerts: []Alert{{
+			Status: statusFiring, Labels: map[string]string{"alertname": "X"},
+			StartsAt: time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate succeeded with startsAt in year 9999, want error")
+	}
+}
+
+func TestValidateRejectsFarFutureEndsAt(t *testing.T) {
+	now := time.Now()
+	p := Payload{
+		Status: statusResolved, Receiver: "r",
+		Alerts: []Alert{{
+			Status: statusResolved, Labels: map[string]string{"alertname": "X"},
+			StartsAt: now, EndsAt: time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
+		}},
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate succeeded with endsAt in year 9999, want error")
+	}
+}
+
+// TestValidateAllowsSmallClockSkew guards against over-tightening: a
+// notification arriving with a startsAt a few seconds ahead of this
+// process's clock (ordinary NTP drift between Alertmanager and the
+// collector) must still be accepted.
+func TestValidateAllowsSmallClockSkew(t *testing.T) {
+	p := Payload{
+		Status: statusFiring, Receiver: "r",
+		Alerts: []Alert{{
+			Status: statusFiring, Labels: map[string]string{"alertname": "X"},
+			StartsAt: time.Now().Add(5 * time.Second),
+		}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Errorf("Validate rejected a startsAt only 5s ahead of now: %v", err)
+	}
+}
+
 func TestValidateRejectsTooManyAlerts(t *testing.T) {
 	alerts := make([]Alert, MaxAlertsPerPayload+1)
 	for i := range alerts {
