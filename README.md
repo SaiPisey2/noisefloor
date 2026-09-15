@@ -37,15 +37,17 @@ Rules      8 active, 0 inactive
 Episodes   4337
 Silences   0
 
-NOISE  CONF  VERDICT   GROUP  RULE           FIRES  P50  SHORT  SILENCED  FLAP  COFIRE  CONC  CHURN  NIGHT
-49     0.8   tune      demo   DemoFlapping   1436   4m   91%    0%        100%  7%      0%    0%     2%
-45     0.8   retire    demo   DemoCauseA     607    3m   100%   0%        0%    100%    0%    0%     5%
-45     0.8   retire    demo   DemoCauseB     607    3m   100%   0%        0%    100%    0%    0%     5%
-45     0.8   retire    demo   DemoCauseC     607    3m   100%   0%        0%    100%    0%    0%     5%
-45     0.8   retire    demo   DemoCauseD     607    3m   100%   0%        0%    100%    0%    0%     5%
-31     0.8   retire    demo   DemoSpiky      444    4m   100%   0%        0%    7%      0%    0%     2%
-4      0.8   automate  demo   DemoSustained  28     1h   0%     0%        0%    7%      0%    0%     33%
+NOISE  CONF  EVID  VERDICT   GROUP  RULE           FIRES  P50  SHORT  SILENCED  FLAP  COFIRE  CONC  CHURN  NIGHT
+49     0.8   est   tune      demo   DemoFlapping   1436   4m   91%    0%        100%  7%      0%    0%     2%
+45     0.8   est   retire    demo   DemoCauseA     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   est   retire    demo   DemoCauseB     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   est   retire    demo   DemoCauseC     607    3m   100%   0%        0%    100%    0%    0%     5%
+45     0.8   est   retire    demo   DemoCauseD     607    3m   100%   0%        0%    100%    0%    0%     5%
+31     0.8   est   retire    demo   DemoSpiky      444    4m   100%   0%        0%    7%      0%    0%     2%
+4      0.8   est   automate  demo   DemoSustained  28     1h   0%     0%        0%    7%      0%    0%     33%
 ```
+
+Every row here reads `est` (estimated) in the EVID column because the demo configures no pager enricher -- see Pager enrichers below. That is deliberate: none of the archetype verdicts above are allowed to depend on one.
 
 This is the output of `make demo-up && make demo-seed && noisefloor scan`;
 exact counts shift slightly between runs as the seeded window slides, and
@@ -84,6 +86,14 @@ rules. See the column notes below.
     long the rule has demonstrably existed -- the earlier of when noisefloor
     first saw it and its own first episode -- so a rule added yesterday cannot
     claim a month of observation however hard it fires today.
+- **EVID** -- whether this row's verdict rests on real pager outcomes or is
+  inferred from firing duration and silence history alone: `est` (estimated
+  -- the only state before Pager enrichers below existed, and still the
+  state for any scan with no enricher configured), or `measNN%` (measured,
+  naming what fraction of this rule's episodes a pager integration actually
+  matched -- see Pager enrichers). "Nobody acknowledged this 400 times" is a
+  categorically stronger claim than "these episodes were short", and this
+  column is where that distinction shows up.
 - **VERDICT** -- see Verdicts below.
 - **GROUP** / **RULE** -- the Prometheus rule group and alert name this row
   scores.
@@ -681,6 +691,122 @@ Doing it this way needed no change to `episodes`, its `UNIQUE` constraint,
 or the backfill's write path that both depend on -- and no migration beyond
 the same `CREATE TABLE IF NOT EXISTS` every table in this schema already
 uses; there is no other migration mechanism in this project to maintain.
+
+## Pager enrichers
+
+**Every signal above this point is inferred from firing shape.**
+`short_lived_rate` assumes a short episode meant nobody could act;
+`silenced_rate` reads a human's silence as a judgement. Both are reasonable
+proxies, and both are guesses. A pager integration supplies the actual
+outcome of a page -- acknowledged, escalated, resolved by a person, resolved
+automatically -- which turns those proxies into measurements for the rules
+it covers.
+
+**Entirely optional, and off by default.** Nothing below changes a single
+verdict unless you configure it: leaving `pagerduty` unset in
+`noisefloor.yaml` (the default, and the demo's configuration) means
+`score.Signals.PagerOutcomes` is `nil` for every rule, which is a complete
+no-op through every scoring path -- see `internal/score/verdict.go`'s
+measured-evidence constants. The seven demo archetypes above are unaffected
+by construction, not by coincidence.
+
+**Partial coverage is the normal case, not an error.** Not every alert
+routes to a pager, and not every page can be confidently matched back to
+the episode that caused it. An enricher reports outcomes only for the
+episodes it can identify (`internal/enrich.Result.Matched`); a rule mostly
+uncovered is weighted as weak evidence, never treated as "checked, found
+nothing" for the rest.
+
+### How measured evidence affects scoring
+
+Measured evidence is deliberately **conservative**, and never rescales the
+noise score itself -- `NoiseScore`'s formula and every existing weight are
+untouched by whether an enricher is configured. Two narrow, asymmetric
+effects apply only once a rule clears a coverage floor (50% of its firing
+episodes matched) and an absolute sample-size floor (10 matched episodes),
+so a handful of lucky or unlucky matches can never swing a verdict:
+
+- **A small, bounded confidence boost** (up to +15% at full measured
+  coverage, still capped at 1.0) -- evidence that is observed rather than
+  inferred is a general reason to trust the aggregate slightly more,
+  independent of what it shows either way.
+- **Consistent human engagement blocks a retire verdict.** If a rule's pages
+  were consistently acknowledged or escalated (>=60% engagement, on a
+  sufficient sample), that is direct evidence the rule is *valuable* --
+  someone keeps responding to it -- which overrides a duration-based retire
+  case regardless of how short the episodes measure. The verdict downgrades
+  to `tune`, not `keep`: high engagement says nothing about whether the rule
+  also flaps or rides another incident.
+- **Consistent non-engagement strengthens a retire case.** A rule that paged
+  at least 50 times and was essentially never acknowledged (<=2% engagement)
+  is stronger retire evidence than an inference from episode duration --
+  it is a direct observation of the exact thing `retire` is trying to
+  justify. This only ever upgrades an otherwise-`keep` verdict; it never
+  touches a rule already flagged `tune` or `automate`, which have a
+  different, already-identified problem.
+
+Both overrides apply only after a rule already clears the existing
+`min_episodes`/confidence floor -- measured evidence augments a qualifying
+verdict, it never bypasses the gate that keeps noisefloor from proposing on
+thin evidence. Full reasoning for every threshold lives beside the
+constants in `internal/score/verdict.go`.
+
+### PagerDuty (reference implementation)
+
+```yaml
+pagerduty:
+  auth:
+    api_token_file: /etc/noisefloor/pagerduty-token
+  service_ids: [PXXXXXX]
+```
+
+Built against PagerDuty's documented REST API v2 (`/incidents`,
+`/log_entries`), authenticated with `Authorization: Token token=...` (a
+token from environment or file, re-read per request so rotation needs no
+restart -- never on argv, never logged; see
+`internal/enrich/pagerduty`'s token-leak test). Paginated at 100 per page,
+bounded by a hard cap so an enormous incident volume degrades to a partial,
+flagged fetch instead of an unbounded number of requests. A `429` backs off
+honoring PagerDuty's documented `RateLimit-Reset` header rather than
+hammering the API; a `5xx` gets the same treatment. Incidents (and, best
+effort, escalation log entries) for a scan's window are fetched **once**
+and reused across every rule scored in that scan, so a rule with thousands
+of pages does not cost thousands of requests.
+
+**Matching is a best-effort heuristic, stated as such.** PagerDuty's REST
+API exposes no field that reliably round-trips noisefloor's own episode
+fingerprint, so an episode is matched to an incident by alert name (in the
+incident's title or `incident_key`) plus time proximity
+(`pagerduty.match_window`, default 5m). Everything read off a matched
+incident -- acknowledged, escalated, resolved by a human or automatically
+-- is a real, observed fact; only the correlation step is a heuristic, which
+is exactly why `PagerOutcomes.Coverage` exists and is weighted into how much
+the aggregate is trusted.
+
+**If PagerDuty is unreachable, or a request ultimately fails, the affected
+rule degrades to estimated scoring with a warning on stderr -- the scan is
+never aborted**, the same posture as an unreachable Alertmanager.
+
+**Exercised only against fixture responses shaped like PagerDuty's
+documented schema** (`internal/enrich/pagerduty/testdata`), including
+pagination and a `429`, never against a live PagerDuty account. Field names
+and shapes are taken from PagerDuty's own published API reference and its
+official `go-pagerduty` Go client; "built from documented behavior" and
+"exercised against the real service" are different claims, and this is
+only the first.
+
+### Opsgenie and incident.io: honest gaps, not stubs pretending otherwise
+
+`internal/enrich/opsgenie` and `internal/enrich/incidentio` exist and
+satisfy `enrich.Enricher`, proving the interface generalises beyond
+PagerDuty's own shapes -- but **neither makes a single HTTP request**.
+`Enrich` returns `ErrNotImplemented` immediately, every time. There is
+deliberately no `pagerduty`-shaped config block for either: adding a config
+surface for an integration that cannot be used would let an operator
+"configure" it and discover the gap only when a scan warns and degrades.
+A client that looks complete but was never exercised against anything is
+worse than a plain refusal -- this is the plain refusal. Whoever implements
+one of these next should add its config alongside it.
 
 ## Limits
 
