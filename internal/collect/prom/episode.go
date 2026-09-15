@@ -115,6 +115,17 @@ func SplitMatrix(m model.Matrix, step time.Duration) []SeriesEpisodes {
 	return out
 }
 
+// Fingerprint is the exported form of fingerprint (below), for callers
+// outside this package that need to compute the identical stable identity
+// for a label set. The webhook collector (issue #13) is the reason this
+// exists: an episode reported over HTTP must key onto the same
+// (alertname, state, fingerprint) identity the backfill computes from
+// ALERTS, or the two paths can never recognise the same firing as one
+// episode. Callers MUST strip "alertname" (and "alertstate", if present)
+// from labels before calling this, exactly as SplitMatrix does, or the
+// fingerprints will not agree.
+func Fingerprint(labels map[string]string) string { return fingerprint(labels) }
+
 // fingerprint is a stable identity for a LABEL SET, not for an alert. It is
 // computed after alertname and alertstate are stripped, so two different alerts
 // sharing the same remaining labels produce the same fingerprint.

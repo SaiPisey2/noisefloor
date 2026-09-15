@@ -724,3 +724,212 @@ func (s *SQLite) GetMeta(ctx context.Context, key string) (string, bool, error) 
 func (s *SQLite) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
+
+// UpsertWebhookEpisode records one episode observed by the webhook
+// collector (issue #13), reconciled against whatever this series already
+// has stored -- from an earlier webhook notification or from the backfill
+// -- so a single firing observed by both paths becomes one episode, never
+// two.
+//
+// Reconciliation rule, in order:
+//
+//  1. Exact match on (rule_id, fingerprint, state, started_at): this is a
+//     repeat notification for an episode already known by either path
+//     (Alertmanager re-sends a firing group every repeat_interval; a
+//     resolved notification shares its firing's startsAt). ended_at is
+//     extended, never shrunk, and source is set to webhook: this firing
+//     now has webhook-fidelity data available, whichever path wrote the
+//     row first.
+//
+//  2. Otherwise, any existing episode for the same (rule_id, fingerprint,
+//     state) whose span OVERLAPS ep's, or is ADJACENT to it within the
+//     wider of the two episodes' resolution_seconds: this is the same
+//     firing, observed less precisely by one side. The existing row's
+//     boundaries are left untouched -- the store's established rule
+//     elsewhere is "what is already stored wins" (see InsertEpisodes), and
+//     rewriting a backfilled episode's started_at would collide with its
+//     own UNIQUE (rule_id, fingerprint, started_at, state) key. Only the
+//     metadata (below) is attached.
+//
+//     The tolerance is the resolution, not a fixed constant, because
+//     resolution IS the documented measure of how far off a backfilled
+//     boundary can be (see prom.BuildIntervals): a webhook episode ending
+//     up to one step after where a backfilled episode for the same series
+//     ends is not a second firing, it is the query step's own imprecision.
+//
+//  3. Otherwise this is a firing neither path has recorded yet -- most
+//     often one entirely invisible to the backfill because it started and
+//     resolved inside a single query step. A new episode is inserted with
+//     Source: SourceWebhook.
+//
+// In every case, meta is attached (upserted) to the resulting episode's
+// id, so the webhook-only fields are never lost even when the episode row
+// itself was not touched.
+func (s *SQLite) UpsertWebhookEpisode(ctx context.Context, ep Episode, meta WebhookMeta) (id int64, reconciled bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	start, end := unix(ep.StartedAt), unix(ep.EndedAt)
+	resSec := int64(ep.Resolution.Seconds())
+
+	const exactQ = `SELECT id, ended_at FROM episodes
+	                WHERE rule_id = ? AND fingerprint = ? AND state = ? AND started_at = ?`
+	var existingEnd int64
+	err = tx.QueryRowContext(ctx, exactQ, ep.RuleID, ep.Fingerprint, ep.State, start).Scan(&id, &existingEnd)
+	switch {
+	case err == nil:
+		newEnd := end
+		if existingEnd > newEnd {
+			newEnd = existingEnd
+		}
+		if _, uerr := tx.ExecContext(ctx,
+			`UPDATE episodes SET ended_at = ?, source = ? WHERE id = ?`,
+			newEnd, SourceWebhook, id); uerr != nil {
+			return 0, false, fmt.Errorf("extend webhook episode: %w", uerr)
+		}
+		reconciled = true
+
+	case errors.Is(err, sql.ErrNoRows):
+		matchID, found, ferr := findReconcilableEpisode(ctx, tx, ep, resSec)
+		if ferr != nil {
+			return 0, false, ferr
+		}
+		if found {
+			id, reconciled = matchID, true
+			break
+		}
+		const insQ = `
+INSERT INTO episodes (rule_id, fingerprint, labels, started_at, ended_at,
+                      resolution_seconds, source, state)
+VALUES (?,?,?,?,?,?,?,?) RETURNING id`
+		if ierr := tx.QueryRowContext(ctx, insQ, ep.RuleID, ep.Fingerprint, toJSON(ep.Labels),
+			start, end, resSec, SourceWebhook, ep.State).Scan(&id); ierr != nil {
+			return 0, false, fmt.Errorf("insert webhook episode: %w", ierr)
+		}
+		reconciled = false
+
+	default:
+		return 0, false, fmt.Errorf("lookup existing episode: %w", err)
+	}
+
+	meta.EpisodeID = id
+	if merr := upsertWebhookMeta(ctx, tx, meta); merr != nil {
+		return 0, false, merr
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("commit: %w", err)
+	}
+	return id, reconciled, nil
+}
+
+// findReconcilableEpisode implements steps 2 of UpsertWebhookEpisode's
+// reconciliation rule: any existing episode of the same series (rule_id,
+// fingerprint, state), from either source, whose span overlaps ep's or
+// sits within tolerance of it, where tolerance is the wider of the two
+// episodes' own resolution_seconds.
+//
+// One (rule_id, fingerprint, state) series rarely accumulates more than a
+// handful of episodes, so this scans them in Go rather than expressing the
+// per-row tolerance comparison in SQL.
+func findReconcilableEpisode(ctx context.Context, tx *sql.Tx, ep Episode, epResSec int64) (int64, bool, error) {
+	const q = `SELECT id, started_at, ended_at, resolution_seconds FROM episodes
+	           WHERE rule_id = ? AND fingerprint = ? AND state = ?
+	           ORDER BY started_at`
+	rows, err := tx.QueryContext(ctx, q, ep.RuleID, ep.Fingerprint, ep.State)
+	if err != nil {
+		return 0, false, fmt.Errorf("find reconcilable episode: %w", err)
+	}
+	defer rows.Close()
+
+	newStart, newEnd := unix(ep.StartedAt), unix(ep.EndedAt)
+
+	for rows.Next() {
+		var id, start, end, res int64
+		if err := rows.Scan(&id, &start, &end, &res); err != nil {
+			return 0, false, fmt.Errorf("scan candidate: %w", err)
+		}
+		tol := res
+		if epResSec > tol {
+			tol = epResSec
+		}
+
+		if newStart < end && start < newEnd {
+			return id, true, nil // overlap
+		}
+		var gap int64
+		switch {
+		case newStart >= end:
+			gap = newStart - end
+		case start >= newEnd:
+			gap = start - newEnd
+		}
+		if gap > 0 && gap <= tol {
+			return id, true, nil // adjacent, within tolerance
+		}
+	}
+	return 0, false, rows.Err()
+}
+
+// upsertWebhookMeta attaches or updates the webhook-only fields for one
+// episode. precise_ended_at only ever grows, matching the same
+// never-rewrite-history-downward posture InsertEpisodes takes for
+// ended_at: a later observation of the same still-firing alert always
+// carries a later (or equal) true end, never an earlier one.
+func upsertWebhookMeta(ctx context.Context, tx *sql.Tx, meta WebhookMeta) error {
+	const q = `
+INSERT INTO episode_webhook_meta (episode_id, receiver, group_key, group_labels,
+                                  annotations, generator_url, external_url,
+                                  precise_started_at, precise_ended_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT (episode_id) DO UPDATE SET
+  receiver           = excluded.receiver,
+  group_key          = excluded.group_key,
+  group_labels       = excluded.group_labels,
+  annotations        = excluded.annotations,
+  generator_url      = excluded.generator_url,
+  external_url       = excluded.external_url,
+  precise_started_at = excluded.precise_started_at,
+  precise_ended_at   = CASE WHEN excluded.precise_ended_at > episode_webhook_meta.precise_ended_at
+                            THEN excluded.precise_ended_at
+                            ELSE episode_webhook_meta.precise_ended_at END,
+  updated_at         = excluded.updated_at`
+	_, err := tx.ExecContext(ctx, q, meta.EpisodeID, meta.Receiver, meta.GroupKey,
+		toJSON(meta.GroupLabels), toJSON(meta.Annotations), meta.GeneratorURL, meta.ExternalURL,
+		unix(meta.PreciseStartedAt), unix(meta.PreciseEndedAt), unix(meta.UpdatedAt))
+	if err != nil {
+		return fmt.Errorf("upsert webhook meta for episode %d: %w", meta.EpisodeID, err)
+	}
+	return nil
+}
+
+// GetWebhookMeta fetches the webhook-only fields for one episode. ok is
+// false when the episode has no webhook data at all -- the common case for
+// a purely backfilled episode.
+func (s *SQLite) GetWebhookMeta(ctx context.Context, episodeID int64) (WebhookMeta, bool, error) {
+	const q = `
+SELECT receiver, group_key, group_labels, annotations, generator_url, external_url,
+       precise_started_at, precise_ended_at, updated_at
+FROM episode_webhook_meta WHERE episode_id = ?`
+	var m WebhookMeta
+	m.EpisodeID = episodeID
+	var groupLabels, annotations string
+	var preciseStart, preciseEnd, updatedAt int64
+	err := s.db.QueryRowContext(ctx, q, episodeID).Scan(&m.Receiver, &m.GroupKey, &groupLabels,
+		&annotations, &m.GeneratorURL, &m.ExternalURL, &preciseStart, &preciseEnd, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WebhookMeta{}, false, nil
+	}
+	if err != nil {
+		return WebhookMeta{}, false, fmt.Errorf("get webhook meta for episode %d: %w", episodeID, err)
+	}
+	m.GroupLabels = fromJSONMap(groupLabels)
+	m.Annotations = fromJSONMap(annotations)
+	m.PreciseStartedAt = fromUnix(preciseStart)
+	m.PreciseEndedAt = fromUnix(preciseEnd)
+	m.UpdatedAt = fromUnix(updatedAt)
+	return m, true, nil
+}

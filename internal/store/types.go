@@ -57,6 +57,42 @@ type Episode struct {
 
 func (e Episode) Duration() time.Duration { return e.EndedAt.Sub(e.StartedAt) }
 
+// WebhookMeta carries the fields an Alertmanager webhook notification
+// provides that the ALERTS series backfill cannot see at all: which
+// receiver routed the alert, the grouping Alertmanager applied,
+// annotations as rendered at fire time (template expansion happens in
+// Alertmanager, not here), and the generatorURL. See issue #13.
+//
+// It is 1:1 with one Episode (EpisodeID is both the foreign key and, in
+// storage, the primary key) and lives in its own table rather than as
+// columns on Episode: adding it this way required no change to the
+// episodes table, its UNIQUE constraint, or the backfill write path that
+// depends on both, and needs no migration beyond the same
+// CREATE TABLE IF NOT EXISTS every other table already uses.
+type WebhookMeta struct {
+	EpisodeID   int64
+	Receiver    string
+	GroupKey    string
+	GroupLabels map[string]string
+	// Annotations are the per-alert annotations as Alertmanager rendered
+	// them for this firing -- distinct from the rule's own annotation
+	// templates, which internal/collect/rules already captures.
+	Annotations  map[string]string
+	GeneratorURL string
+	ExternalURL  string
+
+	// PreciseStartedAt / PreciseEndedAt are the webhook's own exact
+	// boundaries for this firing, always recorded even when the episode
+	// row itself keeps a coarser boundary a backfilled episode already
+	// had -- see SQLite.UpsertWebhookEpisode's reconciliation rule. Nothing
+	// observed is ever thrown away, even when it does not move the
+	// episode's stored started_at/ended_at.
+	PreciseStartedAt time.Time
+	PreciseEndedAt   time.Time
+
+	UpdatedAt time.Time
+}
+
 type Matcher struct {
 	Name    string `json:"name"`
 	Value   string `json:"value"`
