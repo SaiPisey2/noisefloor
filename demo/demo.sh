@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The on-camera half of the README demo. demo/record.sh runs this inside
-# asciinema; running it directly just replays the tour in your terminal.
+# One step of the README demo. Each step is recorded on its own so that
+# demo/record.sh can put a title card between them; `bash demo.sh scan`
+# also just runs the step in your own terminal.
 #
 # Every command here is real and its output is whatever the demo stack
 # actually returns -- nothing is pre-baked. The pipes exist only to keep
@@ -27,40 +28,42 @@ run() {
 }
 
 clear
-sleep 1
+sleep 0.6
 
-# 1. Point it at a Prometheus.
-run "noisefloor init"
-sleep 2
-bash configure.sh
-
-# 2. Score every rule against its own firing history.
-clear
-run "noisefloor scan"
-sleep 7
-
-# 3. Find the services nothing alerts on.
-clear
-run "noisefloor coverage"
-sleep 10
-
-# 4. A pull request for a rule that fires too eagerly.
-clear
-run "noisefloor remediate | grep -A 24 '^tune:'"
-sleep 12
-
-# 5. A starter rule for the blind spot coverage found.
-clear
-run "noisefloor propose | head -27"
-sleep 12
-
-# 6. The same results in a browser. Backgrounded and killed so the
-# recording ends; the output is the same as running it in the foreground.
-clear
-type_cmd "noisefloor serve"
-noisefloor serve &
-serve=$!
-sleep 4
-kill "$serve" 2>/dev/null
-wait "$serve" 2>/dev/null
-sleep 1
+case "${1:?usage: demo.sh <step>}" in
+init)
+	run "noisefloor init"
+	sleep 2
+	;;
+scan)
+	run "noisefloor scan"
+	sleep 6
+	;;
+coverage)
+	run "noisefloor coverage"
+	sleep 9
+	;;
+remediate)
+	run "noisefloor remediate | grep -A 24 '^tune:'"
+	sleep 11
+	;;
+propose)
+	run "noisefloor propose | head -27"
+	sleep 11
+	;;
+serve)
+	# Backgrounded and killed so the recording ends; the output is the
+	# same as running it in the foreground.
+	type_cmd "noisefloor serve"
+	noisefloor serve &
+	serve=$!
+	sleep 3
+	kill "$serve" 2>/dev/null
+	wait "$serve" 2>/dev/null
+	sleep 0.5
+	;;
+*)
+	echo "unknown step: $1" >&2
+	exit 2
+	;;
+esac
