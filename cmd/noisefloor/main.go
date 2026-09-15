@@ -96,6 +96,12 @@ rules:
 # coverage:
 #   services: [checkout, billing]   # include even if up{} doesn't name them
 #   exclude_jobs: [prometheus]      # default; set to [] to see Prometheus's own gap
+#   # noisefloor propose only. Names the existing rule group a starter rule
+#   # for this service should be appended to, when propose cannot find one
+#   # covering the service already. Never a new file or a new group -- see
+#   # the README's Coverage remediation section for why.
+#   rule_targets:
+#     search: {file: ./rules/services.yml, group: services}
 `
 
 func main() {
@@ -125,6 +131,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "propose":
+		if err := runPropose(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -139,6 +150,7 @@ usage:
   noisefloor init [-config noisefloor.yaml]
   noisefloor remediate [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
   noisefloor coverage [-config noisefloor.yaml] [-detail]
+  noisefloor propose [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
 
 Opening pull requests (-apply) needs a GitHub token in $GITHUB_TOKEN.
 `)
@@ -343,5 +355,80 @@ func runCoverage(args []string) error {
 		fmt.Println()
 		return coverage.RenderDetail(os.Stdout, result.Grid)
 	}
+	return nil
+}
+
+// runPropose closes the loop coverage opened: for every blind-spot service
+// coverage.Run finds (no alerting at all on some signal), it proposes ONE
+// starter rule as a pull request, reusing the exact same PR machinery
+// runRemediate does -- FindPR-then-open, dry-run by default, -apply opt-in,
+// $GITHUB_TOKEN over -token. See internal/pr/starter.go's package doc
+// comment for why a starter proposal is a fundamentally different, more
+// conservative kind of claim than a retire or a tune, and why only one
+// rule is proposed per service per run.
+func runPropose(args []string) error {
+	fs := flag.NewFlagSet("propose", flag.ExitOnError)
+	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
+	apply := fs.Bool("apply", false, "open PRs for real (default: dry run, prints what would be opened)")
+	owner := fs.String("owner", "", "GitHub repository owner (required with -apply)")
+	repoName := fs.String("repo", "", "GitHub repository name (required with -apply)")
+	base := fs.String("base", "main", "base branch to open PRs against")
+	tokenFlag := fs.String("token", "",
+		"GitHub token; prefer $GITHUB_TOKEN, since argv is visible in ps and recorded in shell history")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Rules.Path == "" {
+		return fmt.Errorf("rules.path is not configured; propose needs a git checkout of the " +
+			"rule files to append a starter rule to (see README's Coverage remediation section)")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout.Std())
+	defer cancel()
+
+	api, err := prom.New(cfg.Prometheus)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	result, err := coverage.Run(ctx, api, cfg, now)
+	if err != nil {
+		return err
+	}
+
+	var provider pr.Provider
+	switch {
+	case *owner != "" && *repoName != "":
+		token := os.Getenv("GITHUB_TOKEN")
+		if token == "" {
+			token = *tokenFlag
+		}
+		if *apply && token == "" {
+			return fmt.Errorf("-apply requires a GitHub token: set $GITHUB_TOKEN " +
+				"(avoid -token, which puts the token in argv, visible in ps and shell history)")
+		}
+		provider = pr.NewGitHubProvider(token)
+	case *apply:
+		return fmt.Errorf("-apply requires -owner and -repo (which GitHub repository to open PRs against)")
+	default:
+		provider = pr.NewFakeProvider()
+	}
+
+	runResult, err := pr.RunStarters(ctx, provider, api, cfg, result, now, pr.RunOptions{
+		Owner: *owner, Repo: *repoName, Base: *base, RepoRoot: cfg.Rules.Path, Apply: *apply,
+	})
+	if err != nil {
+		return err
+	}
+
+	pr.WriteResult(os.Stdout, runResult, *apply)
 	return nil
 }

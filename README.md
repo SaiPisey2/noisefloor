@@ -340,6 +340,85 @@ reviewing.
 a small interface (`internal/pr.Provider`); a GitLab implementation is a
 new type behind that same interface, not a restructuring.
 
+## Coverage
+
+`scan` finds rules that page for nothing. `noisefloor coverage` finds the
+opposite problem: services with no alerting on some signal at all.
+
+```
+noisefloor coverage -config noisefloor.yaml
+```
+
+It discovers services from Prometheus's own `up` series (grouped by
+Kubernetes namespace/service SD labels where present, otherwise by `job`),
+classifies every alerting rule Prometheus evaluates by which of five
+signals it covers (rate, errors, latency, saturation, burn_rate), and
+prints a grid plus a blind-spot list ranked by traffic -- a service
+carrying real load with zero alerting sorts at the top. `-detail` shows the
+rule and reasoning behind every cell, including which classifications are
+a confident read versus a guess (`v?`).
+
+## Propose starter rules for blind spots
+
+Finding a blind spot is not fixing it. `noisefloor propose` closes that
+gap for a service with **no alert coverage at all**: it opens one pull
+request per service, adding a single starter rule for the most
+fundamental missing signal, reusing the exact same PR machinery
+`remediate` does (branch, diff, body, dry run, idempotence).
+
+```
+noisefloor propose -config noisefloor.yaml
+```
+
+**This is a fundamentally riskier kind of proposal than retire/tune**, and
+the PR body says so up front. A retire or tune proposal is backed by
+thirty days of a real rule's own firing history; a starter rule has never
+existed, so there is no history to derive a threshold from. Every starter
+body carries an explicit warning that its threshold is a conservative
+starting point requiring tuning, never a recommendation -- the one thing
+in the body that is NOT evidence-backed the way everything else noisefloor
+emits is. Where the service's own current metrics allow it (a p99 latency,
+an error ratio, a resident-memory reading), the threshold is scaled from
+that real number and the body says so and shows the arithmetic; otherwise
+it falls back to a fixed, deliberately loose default and says that too.
+
+Four templates, one per signal noisefloor can hand-author a rule for
+(`rate`, `errors`, `latency`, `saturation` -- `burn_rate` rules are
+generator output, not something to propose): "traffic disappeared"
+(`absent()`, no threshold to guess at all), error ratio, p99 latency, and
+resident memory. Each only ever names a metric the service was confirmed,
+by an instant Prometheus query, to actually expose -- verified again after
+the fact by running the generated expression back through coverage's own
+classifier and checking it lands on the intended signal. Priority order is
+rate, errors, latency, saturation: at most one starter rule is proposed
+per blind-spot service per run, the same way remediate never touches more
+than one rule per PR, scaled up one level -- a service that has never had
+any alerting does not get four simultaneous pull requests the first time
+noisefloor looks at it.
+
+**Placement policy.** A retire or tune proposal edits a rule that already
+has a home; a blind spot's whole problem is that no rule exists for it at
+all. `propose` will not guess a rule file's path or invent a new group --
+either is a guess about a team's own layout conventions that a wrong
+answer turns into a PR that does not apply cleanly. Instead:
+
+- if some OTHER signal already has a certain, specifically-matched rule
+  covering this exact service, the new rule is appended to that rule's own
+  group;
+- otherwise, `coverage.rule_targets` in config names an existing group
+  explicitly (`rule_targets: {search: {file: ./rules/services.yml, group:
+  services}}`), verified to actually exist before being trusted;
+- otherwise, the service is refused (reported alongside every other
+  refusal) and the operator is asked to nominate one.
+
+**Refusals**, reported the same way remediate's are: an idle service (see
+coverage's own idle threshold), a signal the service has no recognised
+metric for, existing coverage on the signal that is a guess rather than
+certain (propose will not stack a second rule on an unverified reading),
+and an unresolvable target.
+
+**Dry run by default**, exactly like `remediate`.
+
 ## Limits
 
 - The demo waveforms (`demo/seed`, `demo/faultgen`) carry deterministic,
