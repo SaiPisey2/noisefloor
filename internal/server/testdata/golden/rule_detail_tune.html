@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>FlappingRule - noisefloor</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">noisefloor</div>
+  <nav>
+    <a href="/" class="">Leaderboard</a>
+    <a href="/coverage" class="">Coverage</a>
+  </nav>
+  <div class="readonly-badge" title="This server only displays what a scan already produced. It does not run scans and does not modify the database.">read-only</div>
+</header>
+<main>
+
+
+<p class="breadcrumb"><a href="/">&larr; Leaderboard</a></p>
+<h1>FlappingRule <span class="muted">/ demo</span></h1>
+
+
+<div class="verdict-summary verdict-tune">
+  <span class="badge badge-tune big">tune</span>
+  <span class="noise">noise 48</span>
+  <span class="confidence">confidence 0.80</span>
+  <span class="window">window 2026-08-16 to 2026-09-15</span>
+</div>
+
+
+<section>
+<h2>Rule</h2>
+<dl class="rule-meta">
+  <dt>expr</dt><dd><code class="expr">demo_flapping_gauge &gt; 0</code></dd>
+  <dt>for</dt><dd>30s</dd>
+  <dt>location</dt><dd>/etc/prometheus/rules/demo.yml:12</dd>
+  <dt>active</dt><dd>yes</dd>
+  <dt>labels</dt><dd><span class="kv">severity=warning</span> </dd>
+  <dt>annotations</dt><dd><div class="kv-block"><strong>summary:</strong> demo alert flaps on and off</div></dd>
+</dl>
+</section>
+
+
+<section>
+<h2>Signal breakdown</h2>
+<p class="lede">The five weighted signals sum to the noise score above; the rest inform the verdict without adding to it.</p>
+<table class="signals">
+<thead><tr><th>signal</th><th>value</th><th>weight</th><th>contribution</th></tr></thead>
+<tbody>
+
+<tr class="">
+  <td>short_lived_rate</td>
+  <td class="num">91%</td>
+  <td class="num">0.30</td>
+  <td class="num">27.3</td>
+</tr>
+
+<tr class="">
+  <td>silenced_rate</td>
+  <td class="num">0%</td>
+  <td class="num">0.25</td>
+  <td class="num">0.0</td>
+</tr>
+
+<tr class="">
+  <td>flap_rate</td>
+  <td class="num">97%</td>
+  <td class="num">0.20</td>
+  <td class="num">19.4</td>
+</tr>
+
+<tr class="">
+  <td>cofire_ratio</td>
+  <td class="num">7%</td>
+  <td class="num">0.15</td>
+  <td class="num">1.1</td>
+</tr>
+
+<tr class="">
+  <td>offhours_rate</td>
+  <td class="num">0%</td>
+  <td class="num">0.10</td>
+  <td class="num">0.0</td>
+</tr>
+
+<tr class="unweighted">
+  <td>concentration</td>
+  <td class="num">0%</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+<tr class="unweighted">
+  <td>pending_churn</td>
+  <td class="num">0%</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+<tr class="unweighted">
+  <td>fires</td>
+  <td class="num">3</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+<tr class="unweighted">
+  <td>unique_fingerprints</td>
+  <td class="num">1</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+<tr class="unweighted">
+  <td>p50_duration</td>
+  <td class="num">4m</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+<tr class="unweighted">
+  <td>p90_duration</td>
+  <td class="num">4m</td>
+  <td class="num">-</td>
+  <td class="num">-</td>
+</tr>
+
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Episode timeline</h2>
+
+<p class="lede">2026-09-15 to 2026-09-15. Top lane is firing time, bottom lane is pending (below <code>for:</code>) time. A dense band is flapping; the percentages above are the summary of exactly this picture.</p>
+<svg class="timeline" viewBox="0 0 1000 60" preserveAspectRatio="none" role="img" aria-label="Episode timeline">
+<rect x="0" y="8" width="11.11111111111111" height="18" class="bar-firing"><title>firing 2026-09-15T06:00:00Z (4m)</title></rect>
+<rect x="333.3333333333333" y="8" width="11.11111111111111" height="18" class="bar-firing"><title>firing 2026-09-15T08:00:00Z (4m)</title></rect>
+<rect x="666.6666666666666" y="8" width="11.11111111111111" height="18" class="bar-firing"><title>firing 2026-09-15T10:00:00Z (4m)</title></rect>
+</svg>
+
+</section>
+
+
+
+
+<section class="counterfactual">
+<h2>Counterfactual: raising <code>for:</code></h2>
+<p class="sentence">p90 episode is 4m, current `for: 30s`; `for: 4m30s` would have suppressed 0% of past fires and retained 0 of 0 episodes longer than 9m.</p>
+<table class="counterfactual-table">
+<tbody>
+<tr><th>current <code>for:</code></th><td>30s</td></tr>
+<tr><th>candidate <code>for:</code></th><td>4m30s</td></tr>
+<tr><th>episodes considered</th><td>3</td></tr>
+<tr><th>would be suppressed</th><td>0 (0%)</td></tr>
+<tr><th>would still fire</th><td>3</td></tr>
+<tr><th>episodes over 9m retained</th><td>0 of 0</td></tr>
+</tbody>
+</table>
+<p class="lede">This is the same evidence a <code>noisefloor remediate</code> pull request would state for this rule. The server never opens one -- run the CLI to act on it.</p>
+</section>
+
+
+</main>
+<footer class="site-footer">
+  <p>noisefloor is unauthenticated by design. Run it behind something that isn't, if it is reachable by anyone you don't trust.</p>
+</footer>
+
+</body>
+</html>

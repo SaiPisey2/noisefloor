@@ -1,0 +1,20 @@
+{{define "header"}}<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">noisefloor</div>
+  <nav>
+    <a href="/" class="{{if eq .Page "leaderboard"}}active{{end}}">Leaderboard</a>
+    <a href="/coverage" class="{{if eq .Page "coverage"}}active{{end}}">Coverage</a>
+  </nav>
+  <div class="readonly-badge" title="This server only displays what a scan already produced. It does not run scans and does not modify the database.">read-only</div>
+</header>
+<main>
+{{end}}
+{{define "footer"}}</main>
+<footer class="site-footer">
+  <p>noisefloor is unauthenticated by design. Run it behind something that isn't, if it is reachable by anyone you don't trust.</p>
+</footer>
+{{end}}

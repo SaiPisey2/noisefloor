@@ -1,0 +1,51 @@
+{{define "leaderboard_page"}}<!doctype html>
+<html lang="en">
+<head>
+<title>Leaderboard - noisefloor</title>
+{{template "header" .}}
+<h1>Leaderboard</h1>
+<p class="lede">Every active rule that has fired at least once, ranked by noise score. This is what <code>noisefloor scan</code> printed to a terminal, same numbers, same ordering.</p>
+
+{{if not .Rows}}
+<p class="empty">No scored rules yet. Run <code>noisefloor scan</code> against this database.</p>
+{{else}}
+<div class="filter-bar">
+  <input type="search" id="filter" placeholder="Filter by rule or group..." autocomplete="off">
+</div>
+<div class="table-scroll">
+<table class="leaderboard" id="leaderboard-table">
+<thead>
+<tr>
+  {{range .Columns}}<th><a href="{{.URL}}">{{.Label}}{{if .Sorted}} {{.Dir}}{{end}}</a></th>{{end}}
+  <th>FIRES</th><th>P50</th><th>SHORT</th><th>SILENCED</th><th>FLAP</th><th>COFIRE</th><th>CONC</th><th>CHURN</th><th>NIGHT</th>
+</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr class="verdict-{{.Verdict}}" data-name="{{.AlertName}} {{.GroupName}}">
+  <td class="num">{{printf "%.0f" .Noise}}</td>
+  <td class="num">{{printf "%.1f" .Confidence}}</td>
+  <td><span class="badge badge-{{.Verdict}}">{{.Verdict}}</span></td>
+  <td>{{.GroupName}}</td>
+  <td><a href="/rules/{{.ID}}">{{.AlertName}}</a></td>
+  <td class="num">{{.Fires}}</td>
+  <td class="num">{{.P50}}</td>
+  <td class="num">{{.Short}}</td>
+  <td class="num">{{.Silenced}}</td>
+  <td class="num">{{.Flap}}</td>
+  <td class="num">{{.Cofire}}</td>
+  <td class="num">{{.Conc}}</td>
+  <td class="num">{{.Churn}}</td>
+  <td class="num">{{.Night}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
+
+<script src="/static/filter.js"></script>
+{{template "footer" .}}
+</body>
+</html>
+{{end}}

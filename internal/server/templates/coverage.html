@@ -1,0 +1,60 @@
+{{define "coverage_page"}}<!doctype html>
+<html lang="en">
+<head>
+<title>Coverage - noisefloor</title>
+{{template "header" .}}
+<h1>Coverage</h1>
+{{if not .HasSnapshot}}
+<p class="empty">No coverage snapshot yet. Run <code>noisefloor coverage</code> against this database.</p>
+{{else}}
+<p class="lede">As of {{.Snapshot.ComputedAt.Format "2006-01-02 15:04 MST"}}. <code>v</code> = a rule names this service specifically, <code>g</code> = only a cluster-wide rule sweeps it up, <code>?</code> = a guessed classification, <code>-</code> = no coverage. Run <code>noisefloor coverage -detail</code> on the CLI for the full reasoning behind every cell.</p>
+
+{{if .Snapshot.ExcludedJobs}}<p class="note">Excluded jobs (coverage.exclude_jobs): {{range .Snapshot.ExcludedJobs}}<code>{{.}}</code> {{end}}</p>{{end}}
+{{if .Snapshot.ParseErrors}}
+<p class="note warn">{{len .Snapshot.ParseErrors}} rule(s) could not be parsed and are excluded from coverage.</p>
+{{end}}
+{{if .Snapshot.Unattributed}}
+<p class="note warn">{{len .Snapshot.Unattributed}} rule(s) parsed and classified but name no service discovered here (not counted as coverage for anyone): {{range .Snapshot.Unattributed}}<code>{{.}}</code> {{end}}</p>
+{{end}}
+
+<div class="table-scroll">
+<table class="coverage-grid">
+<thead><tr><th>service</th><th>source</th><th>rate</th><th>errors</th><th>latency</th><th>saturation</th><th>burn_rate</th></tr></thead>
+<tbody>
+{{range .Rows}}
+<tr>
+  <td>{{.Service.Name}}</td>
+  <td>{{.Service.Source}}</td>
+  {{range .Cells}}<td class="cov-cell cov-{{.Class}}" title="{{.Tooltip}}">{{.Glyph}}</td>{{end}}
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+
+<section>
+<h2>Blind spots</h2>
+<p class="lede">Services no rule names specifically, ranked by traffic within each basis (req/s ranked above raw scrape-sample counts -- the two are not comparable).</p>
+{{if not .BlindSpots}}
+<p class="empty">None.</p>
+{{else}}
+<table class="blind-spots">
+<thead><tr><th>service</th><th>traffic</th><th>basis</th><th>status</th></tr></thead>
+<tbody>
+{{range .BlindSpots}}
+<tr class="{{if .Idle}}idle{{end}}">
+  <td>{{.Service.Name}}</td>
+  <td class="num">{{printf "%.2f" .Service.Traffic}}</td>
+  <td>{{.Service.TrafficBasis}}</td>
+  <td>{{if .Idle}}idle -- not ranked as urgent{{else}}no rule names this service{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+</section>
+{{end}}
+{{template "footer" .}}
+</body>
+</html>
+{{end}}

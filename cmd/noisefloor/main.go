@@ -4,8 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
@@ -16,6 +19,7 @@ import (
 	"github.com/SaiPisey2/noisefloor/internal/pr"
 	"github.com/SaiPisey2/noisefloor/internal/report"
 	"github.com/SaiPisey2/noisefloor/internal/scanner"
+	"github.com/SaiPisey2/noisefloor/internal/server"
 	"github.com/SaiPisey2/noisefloor/internal/store"
 )
 
@@ -136,6 +140,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "serve":
+		if err := runServe(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -151,8 +160,13 @@ usage:
   noisefloor remediate [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
   noisefloor coverage [-config noisefloor.yaml] [-detail]
   noisefloor propose [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
+  noisefloor serve [-config noisefloor.yaml] [-addr 127.0.0.1:9091] [-allow-remote]
 
 Opening pull requests (-apply) needs a GitHub token in $GITHUB_TOKEN.
+
+serve is read-only: it renders whatever the last scan and coverage run
+wrote to the database. It binds to loopback only unless -allow-remote is
+given, and has no authentication at all -- see -allow-remote's own warning.
 `)
 }
 
@@ -211,9 +225,31 @@ func runScan(args []string) error {
 	}
 
 	now := time.Now().UTC()
+	started := time.Now()
 	result, err := scanner.RunFull(ctx, cfg, db, api, now)
 	if err != nil {
 		return err
+	}
+
+	// Record operational stats for the server's /metrics (issue #12) to
+	// read later -- a separate, longer-lived process than this one. A
+	// failure to save them must not fail a scan that already completed and
+	// already wrote every score; it only means the next /metrics scrape
+	// reports slightly stale numbers.
+	verdicts := map[string]int{}
+	for _, row := range result.Rows {
+		verdicts[row.Verdict]++
+	}
+	stats := scanner.ScanStats{
+		ComputedAt:      now,
+		DurationSeconds: time.Since(started).Seconds(),
+		Episodes:        result.Meta.Episodes,
+		RulesScored:     len(result.Rows),
+		QueryFailures:   result.Meta.QueryRetries,
+		Verdicts:        verdicts,
+	}
+	if err := scanner.SaveStats(ctx, db, stats); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save scan stats for /metrics: %v\n", err)
 	}
 
 	return report.Render(os.Stdout, result.Rows, result.Meta)
@@ -348,6 +384,20 @@ func runCoverage(args []string) error {
 		return err
 	}
 
+	// Persist the result so `noisefloor serve` (issue #12) can render the
+	// coverage grid and blind-spot list from the database rather than
+	// issuing its own live Prometheus queries on every page load -- the
+	// server is read-only and must not become a way to trigger these
+	// queries from an unauthenticated request.
+	db, err := store.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := coverage.Save(ctx, db, coverage.NewSnapshot(now, result)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save coverage snapshot for the server: %v\n", err)
+	}
+
 	if err := coverage.Render(os.Stdout, result); err != nil {
 		return err
 	}
@@ -431,4 +481,83 @@ func runPropose(args []string) error {
 
 	pr.WriteResult(os.Stdout, runResult, *apply)
 	return nil
+}
+
+// runServe starts the read-only HTTP server (issue #12): it renders
+// whatever `scan` and `coverage` already wrote to the database. It never
+// opens a Prometheus client, never runs a scan, and never writes to the
+// database -- see internal/server's package doc comment for why all three
+// are load-bearing, not incidental.
+//
+// It binds to loopback only unless -allow-remote is given, because the
+// pages here are a team's complete alerting posture: which rules are
+// noisy, which services have no coverage at all. That is reconnaissance
+// material and there is no authentication in front of it -- binding wider
+// requires the operator to say so explicitly, and doing so prints a
+// warning every time, not just the first.
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
+	addr := fs.String("addr", server.DefaultAddr, "address to listen on")
+	allowRemote := fs.Bool("allow-remote", false,
+		"allow binding to a non-loopback address (required if -addr is not loopback)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	if !server.IsLoopback(*addr) {
+		if !*allowRemote {
+			return fmt.Errorf(
+				"-addr %s is not loopback; pass -allow-remote to bind it (there is NO "+
+					"authentication in front of this server -- see the README before you do)",
+				*addr)
+		}
+		fmt.Fprintf(os.Stderr,
+			"warning: binding to %s, which is reachable beyond this machine.\n"+
+				"         noisefloor serve has NO authentication. It exposes this team's\n"+
+				"         complete alerting posture: which rules are noisy, which services\n"+
+				"         have no coverage at all. Put a reverse proxy with real auth in\n"+
+				"         front of it, or run this on a network you already trust.\n", *addr)
+	}
+
+	db, err := store.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	srv, err := server.New(cfg, db)
+	if err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", *addr, err)
+	}
+	fmt.Printf("noisefloor serve listening on http://%s (read-only, no authentication)\n", ln.Addr())
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	httpSrv := &http.Server{Handler: srv.Handler()}
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
+	}
 }

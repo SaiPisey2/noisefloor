@@ -1,0 +1,100 @@
+{{define "rule_page"}}<!doctype html>
+<html lang="en">
+<head>
+<title>{{.Detail.Rule.AlertName}} - noisefloor</title>
+{{template "header" .}}
+{{$d := .Detail}}
+<p class="breadcrumb"><a href="/">&larr; Leaderboard</a></p>
+<h1>{{$d.Rule.AlertName}} <span class="muted">/ {{$d.Rule.GroupName}}</span></h1>
+
+{{if $d.HasScore}}
+<div class="verdict-summary verdict-{{$d.Score.Verdict}}">
+  <span class="badge badge-{{$d.Score.Verdict}} big">{{$d.Score.Verdict}}</span>
+  <span class="noise">noise {{printf "%.0f" $d.Score.NoiseScore}}</span>
+  <span class="confidence">confidence {{printf "%.2f" $d.Score.Confidence}}</span>
+  <span class="window">window {{$d.Score.WindowStart.Format "2006-01-02"}} to {{$d.Score.WindowEnd.Format "2006-01-02"}}</span>
+</div>
+{{else}}
+<p class="empty">This rule has no score: it has never fired in the scored window, is currently inactive, or its alert name is defined in more than one rule group and cannot be scored.</p>
+{{end}}
+
+<section>
+<h2>Rule</h2>
+<dl class="rule-meta">
+  <dt>expr</dt><dd><code class="expr">{{$d.Rule.Expr}}</code></dd>
+  <dt>for</dt><dd>{{duration $d.Rule.For}}</dd>
+  {{if $d.Rule.File}}<dt>location</dt><dd>{{$d.Rule.File}}:{{$d.Rule.Line}}</dd>{{end}}
+  <dt>active</dt><dd>{{if $d.Rule.Active}}yes{{else}}no -- Prometheus no longer reports this rule{{end}}</dd>
+  {{if $d.Rule.Labels}}<dt>labels</dt><dd>{{range $k, $v := $d.Rule.Labels}}<span class="kv">{{$k}}={{$v}}</span> {{end}}</dd>{{end}}
+  {{if $d.Rule.Annotations}}<dt>annotations</dt><dd>{{range $k, $v := $d.Rule.Annotations}}<div class="kv-block"><strong>{{$k}}:</strong> {{$v}}</div>{{end}}</dd>{{end}}
+</dl>
+</section>
+
+{{if $d.HasScore}}
+<section>
+<h2>Signal breakdown</h2>
+<p class="lede">The five weighted signals sum to the noise score above; the rest inform the verdict without adding to it.</p>
+<table class="signals">
+<thead><tr><th>signal</th><th>value</th><th>weight</th><th>contribution</th></tr></thead>
+<tbody>
+{{range $d.Signals}}
+<tr class="{{if not .Weighted}}unweighted{{end}}">
+  <td>{{.Name}}</td>
+  <td class="num">{{.Value}}</td>
+  <td class="num">{{if .Weighted}}{{printf "%.2f" .Weight}}{{else}}-{{end}}</td>
+  <td class="num">{{if .Weighted}}{{printf "%.1f" .Contribution}}{{else}}-{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Episode timeline</h2>
+{{if $d.Timeline.Empty}}
+<p class="empty">No episodes recorded.</p>
+{{else}}
+<p class="lede">{{$d.Timeline.WindowStart.Format "2006-01-02"}} to {{$d.Timeline.WindowEnd.Format "2006-01-02"}}. Top lane is firing time, bottom lane is pending (below <code>for:</code>) time. A dense band is flapping; the percentages above are the summary of exactly this picture.</p>
+<svg class="timeline" viewBox="0 0 {{$d.Timeline.ViewWidth}} {{$d.Timeline.ViewHeight}}" preserveAspectRatio="none" role="img" aria-label="Episode timeline">
+{{range $d.Timeline.Bars}}<rect x="{{.X}}" y="{{.Y}}" width="{{.Width}}" height="18" class="{{if .Firing}}bar-firing{{else}}bar-pending{{end}}"><title>{{.Title}}</title></rect>
+{{end}}</svg>
+{{end}}
+</section>
+
+{{if $d.Silences}}
+<section>
+<h2>Silences</h2>
+<p class="lede">Silences that covered at least one of this rule's firing episodes.</p>
+<table class="silences">
+<thead><tr><th>from</th><th>to</th><th>created by</th><th>comment</th></tr></thead>
+<tbody>
+{{range $d.Silences}}
+<tr><td>{{.StartsAt.Format "2006-01-02 15:04"}}</td><td>{{.EndsAt.Format "2006-01-02 15:04"}}</td><td>{{.CreatedBy}}</td><td>{{.Comment}}</td></tr>
+{{end}}
+</tbody>
+</table>
+</section>
+{{end}}
+
+{{if $d.Counterfactual}}
+<section class="counterfactual">
+<h2>Counterfactual: raising <code>for:</code></h2>
+<p class="sentence">{{$d.CounterfactualSentence}}</p>
+<table class="counterfactual-table">
+<tbody>
+<tr><th>current <code>for:</code></th><td>{{duration $d.Rule.For}}</td></tr>
+<tr><th>candidate <code>for:</code></th><td>{{duration $d.Counterfactual.CandidateFor}}</td></tr>
+<tr><th>episodes considered</th><td>{{$d.Counterfactual.Total}}</td></tr>
+<tr><th>would be suppressed</th><td>{{$d.Counterfactual.Suppressed}} ({{pct $d.Counterfactual.SuppressedRate}})</td></tr>
+<tr><th>would still fire</th><td>{{$d.Counterfactual.Retained}}</td></tr>
+<tr><th>episodes over {{duration $d.Counterfactual.LongThreshold}} retained</th><td>{{$d.Counterfactual.LongRetained}} of {{$d.Counterfactual.LongTotal}}</td></tr>
+</tbody>
+</table>
+<p class="lede">This is the same evidence a <code>noisefloor remediate</code> pull request would state for this rule. The server never opens one -- run the CLI to act on it.</p>
+</section>
+{{end}}
+{{end}}
+{{template "footer" .}}
+</body>
+</html>
+{{end}}

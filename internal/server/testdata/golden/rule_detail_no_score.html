@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>NeverFires - noisefloor</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">noisefloor</div>
+  <nav>
+    <a href="/" class="">Leaderboard</a>
+    <a href="/coverage" class="">Coverage</a>
+  </nav>
+  <div class="readonly-badge" title="This server only displays what a scan already produced. It does not run scans and does not modify the database.">read-only</div>
+</header>
+<main>
+
+
+<p class="breadcrumb"><a href="/">&larr; Leaderboard</a></p>
+<h1>NeverFires <span class="muted">/ demo</span></h1>
+
+
+<p class="empty">This rule has no score: it has never fired in the scored window, is currently inactive, or its alert name is defined in more than one rule group and cannot be scored.</p>
+
+
+<section>
+<h2>Rule</h2>
+<dl class="rule-meta">
+  <dt>expr</dt><dd><code class="expr">up{job=&#34;quiet&#34;} == 0</code></dd>
+  <dt>for</dt><dd>1m</dd>
+  
+  <dt>active</dt><dd>yes</dd>
+  
+  
+</dl>
+</section>
+
+
+</main>
+<footer class="site-footer">
+  <p>noisefloor is unauthenticated by design. Run it behind something that isn't, if it is reachable by anyone you don't trust.</p>
+</footer>
+
+</body>
+</html>

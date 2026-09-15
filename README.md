@@ -472,6 +472,79 @@ nor why.
 
 **Dry run by default**, exactly like `remediate`.
 
+## Server
+
+`noisefloor serve` renders whatever `scan` and `coverage` already wrote to the
+database, as HTML pages and a small JSON API:
+
+```
+noisefloor serve -config noisefloor.yaml
+```
+
+```
+noisefloor serve listening on http://127.0.0.1:9091 (read-only, no authentication)
+```
+
+- **Leaderboard** (`/`) -- the scan table, sortable by clicking a column
+  header, with every signal that drives each rule's verdict.
+- **Rule detail** (`/rules/{id}`) -- the signal breakdown behind one rule's
+  noise score, its episode timeline (a firing lane and a pending lane, so
+  flapping is visible as a dense band rather than a percentage), and, for a
+  `tune` verdict, the same `for:` counterfactual a `remediate` pull request
+  would state.
+- **Coverage** (`/coverage`) -- the signal matrix from the last
+  `noisefloor coverage` run and the ranked blind-spot list, preserving the
+  distinction between matched, global (`g`) and guessed (`?`) coverage.
+
+API: `GET /api/rules`, `GET /api/rules/{id}`, `GET /api/scores`,
+`GET /api/coverage`, `GET /healthz`, and `GET /metrics`.
+
+**Read-only, always.** The server never opens a Prometheus client, never
+runs a scan or a coverage pass, and never writes to the database -- it can
+only show you what the CLI already produced. There is no "rescan" button
+and there will not be one: an unauthenticated endpoint that could trigger a
+scan is a denial-of-service primitive against your own Prometheus.
+
+**Binds to loopback (`127.0.0.1:9091`) by default, and there is no
+authentication in front of it at all.** This page is a team's complete
+alerting posture -- which rules are noisy, which services have no coverage
+whatsoever -- which is reconnaissance material in the wrong hands. Binding
+anywhere wider requires an explicit `-allow-remote`, and doing so prints a
+warning every time the server starts, not just the first:
+
+```
+noisefloor serve -addr 0.0.0.0:9091 -allow-remote
+```
+
+If you need this reachable beyond one machine, put a reverse proxy with
+real authentication in front of it. noisefloor will not build that for you.
+
+**`/metrics`** exports operational series about the last completed scan, in
+`client_golang`'s usual format, plus the server's own request metrics:
+
+- `noisefloor_scan_duration_seconds`
+- `noisefloor_scan_episodes_reconstructed`
+- `noisefloor_scan_rules_scored`
+- `noisefloor_scan_last_success_timestamp_seconds`
+- `noisefloor_scan_query_failures` -- retryable Prometheus failures absorbed
+  during the scan (see `prometheus.retry_attempts` above)
+- `noisefloor_rules_by_verdict{verdict=...}`
+- `noisefloor_http_requests_total{method,route,code}` and
+  `noisefloor_http_request_duration_seconds{method,route}`
+
+The scan-derived series are absent (not zero) until a scan has completed
+against the database at least once -- a database `serve` has never seen
+scanned reads as "no data", not as "a scan found nothing".
+
+**Templates and static assets are embedded** (`embed.FS`); the binary that
+runs `serve` is the same single binary `scan` and everything else ships as.
+There is no separate frontend build, no Node toolchain, and no JavaScript
+framework -- server-rendered `html/template` (which escapes untrusted
+content -- alert names, labels, annotations, PromQL expressions -- by
+default) plus a few dozen lines of vanilla JS for a client-side table
+filter. The core content of every page renders and reads correctly with
+JavaScript disabled.
+
 ## Limits
 
 - The demo waveforms (`demo/seed`, `demo/faultgen`) carry deterministic,

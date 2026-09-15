@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Leaderboard - noisefloor</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">noisefloor</div>
+  <nav>
+    <a href="/" class="active">Leaderboard</a>
+    <a href="/coverage" class="">Coverage</a>
+  </nav>
+  <div class="readonly-badge" title="This server only displays what a scan already produced. It does not run scans and does not modify the database.">read-only</div>
+</header>
+<main>
+
+<h1>Leaderboard</h1>
+<p class="lede">Every active rule that has fired at least once, ranked by noise score. This is what <code>noisefloor scan</code> printed to a terminal, same numbers, same ordering.</p>
+
+
+<div class="filter-bar">
+  <input type="search" id="filter" placeholder="Filter by rule or group..." autocomplete="off">
+</div>
+<div class="table-scroll">
+<table class="leaderboard" id="leaderboard-table">
+<thead>
+<tr>
+  <th><a href="/?sort=noise&amp;dir=asc">NOISE ↓</a></th><th><a href="/?sort=confidence&amp;dir=desc">CONF</a></th><th><a href="/?sort=verdict&amp;dir=desc">VERDICT</a></th><th><a href="/?sort=group&amp;dir=desc">GROUP</a></th><th><a href="/?sort=rule&amp;dir=desc">RULE</a></th>
+  <th>FIRES</th><th>P50</th><th>SHORT</th><th>SILENCED</th><th>FLAP</th><th>COFIRE</th><th>CONC</th><th>CHURN</th><th>NIGHT</th>
+</tr>
+</thead>
+<tbody>
+
+<tr class="verdict-tune" data-name="FlappingRule demo">
+  <td class="num">48</td>
+  <td class="num">0.8</td>
+  <td><span class="badge badge-tune">tune</span></td>
+  <td>demo</td>
+  <td><a href="/rules/2">FlappingRule</a></td>
+  <td class="num">1186</td>
+  <td class="num">4m</td>
+  <td class="num">91%</td>
+  <td class="num">0%</td>
+  <td class="num">97%</td>
+  <td class="num">7%</td>
+  <td class="num">0%</td>
+  <td class="num">0%</td>
+  <td class="num">0%</td>
+</tr>
+
+<tr class="verdict-retire" data-name="CauseySymptom demo">
+  <td class="num">45</td>
+  <td class="num">0.8</td>
+  <td><span class="badge badge-retire">retire</span></td>
+  <td>demo</td>
+  <td><a href="/rules/1">CauseySymptom</a></td>
+  <td class="num">504</td>
+  <td class="num">3m</td>
+  <td class="num">100%</td>
+  <td class="num">0%</td>
+  <td class="num">0%</td>
+  <td class="num">100%</td>
+  <td class="num">0%</td>
+  <td class="num">0%</td>
+  <td class="num">1%</td>
+</tr>
+
+</tbody>
+</table>
+</div>
+
+
+<script src="/static/filter.js"></script>
+</main>
+<footer class="site-footer">
+  <p>noisefloor is unauthenticated by design. Run it behind something that isn't, if it is reachable by anyone you don't trust.</p>
+</footer>
+
+</body>
+</html>

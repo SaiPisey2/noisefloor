@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Coverage - noisefloor</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">noisefloor</div>
+  <nav>
+    <a href="/" class="">Leaderboard</a>
+    <a href="/coverage" class="active">Coverage</a>
+  </nav>
+  <div class="readonly-badge" title="This server only displays what a scan already produced. It does not run scans and does not modify the database.">read-only</div>
+</header>
+<main>
+
+<h1>Coverage</h1>
+
+<p class="lede">As of 2026-09-15 12:00 UTC. <code>v</code> = a rule names this service specifically, <code>g</code> = only a cluster-wide rule sweeps it up, <code>?</code> = a guessed classification, <code>-</code> = no coverage. Run <code>noisefloor coverage -detail</code> on the CLI for the full reasoning behind every cell.</p>
+
+<p class="note">Excluded jobs (coverage.exclude_jobs): <code>prometheus</code> </p>
+
+
+
+<div class="table-scroll">
+<table class="coverage-grid">
+<thead><tr><th>service</th><th>source</th><th>rate</th><th>errors</th><th>latency</th><th>saturation</th><th>burn_rate</th></tr></thead>
+<tbody>
+
+<tr>
+  <td>search</td>
+  <td>job</td>
+  <td class="cov-cell cov-global-certain" title="services/TargetDown: up is the standard Prometheus target-availability metric">g</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td>
+</tr>
+
+<tr>
+  <td>shop/checkout</td>
+  <td>k8s</td>
+  <td class="cov-cell cov-matched-certain" title="services/CheckoutNoTraffic: generic request/operation counter">v</td><td class="cov-cell cov-matched-certain" title="services/CheckoutErrorRateHigh: selector on code selects failure-like values">v</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td><td class="cov-cell cov-none" title="no rule covers this signal">-</td>
+</tr>
+
+</tbody>
+</table>
+</div>
+
+<section>
+<h2>Blind spots</h2>
+<p class="lede">Services no rule names specifically, ranked by traffic within each basis (req/s ranked above raw scrape-sample counts -- the two are not comparable).</p>
+
+<table class="blind-spots">
+<thead><tr><th>service</th><th>traffic</th><th>basis</th><th>status</th></tr></thead>
+<tbody>
+
+<tr class="">
+  <td>search</td>
+  <td class="num">40.00</td>
+  <td>req/s</td>
+  <td>no rule names this service</td>
+</tr>
+
+</tbody>
+</table>
+
+</section>
+
+</main>
+<footer class="site-footer">
+  <p>noisefloor is unauthenticated by design. Run it behind something that isn't, if it is reachable by anyone you don't trust.</p>
+</footer>
+
+</body>
+</html>
