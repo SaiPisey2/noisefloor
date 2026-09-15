@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/collect/prom"
+	"github.com/SaiPisey2/noisefloor/internal/collect/webhook"
 	"github.com/SaiPisey2/noisefloor/internal/config"
 	"github.com/SaiPisey2/noisefloor/internal/coverage"
 	"github.com/SaiPisey2/noisefloor/internal/pr"
@@ -145,6 +146,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "collect":
+		if err := runCollect(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -161,12 +167,21 @@ usage:
   noisefloor coverage [-config noisefloor.yaml] [-detail]
   noisefloor propose [-config noisefloor.yaml] [-apply] [-owner OWNER -repo REPO]
   noisefloor serve [-config noisefloor.yaml] [-addr 127.0.0.1:9091] [-allow-remote]
+  noisefloor collect [-config noisefloor.yaml] [-addr 127.0.0.1:9094] [-allow-remote]
 
 Opening pull requests (-apply) needs a GitHub token in $GITHUB_TOKEN.
 
 serve is read-only: it renders whatever the last scan and coverage run
 wrote to the database. It binds to loopback only unless -allow-remote is
 given, and has no authentication at all -- see -allow-remote's own warning.
+
+collect is an optional, forward-looking Alertmanager webhook receiver (see
+webhook_configs in the README). It WRITES episodes, so it is a separate
+command from serve, not a route on it. The backfill from ALERTS remains
+sufficient on its own; collect only adds what that series cannot carry:
+receiver, grouping, fire-time annotations, and sub-step fidelity. Binds to
+loopback only unless -allow-remote is given; configure webhook.auth in the
+config file to require a bearer token from Alertmanager before binding wider.
 `)
 }
 
@@ -574,6 +589,104 @@ func runServe(args []string) error {
 		// IdleTimeout bounds how long a keep-alive connection may sit
 		// between requests before this server closes it.
 		IdleTimeout: 120 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
+	}
+}
+
+// runCollect starts the Alertmanager webhook receiver (issue #13). It is
+// its own command, not a route under `serve`, because serve is documented
+// and tested as strictly read-only and this command writes episodes to the
+// database on every request it accepts.
+//
+// It binds to loopback only unless -allow-remote is given, for the same
+// reason `serve` does: this is a write endpoint with no authentication
+// unless webhook.auth is configured, and binding it wide open by default
+// would let anyone who can reach the port inject fabricated firing history
+// into the database the leaderboard is scored from.
+func runCollect(args []string) error {
+	fs := flag.NewFlagSet("collect", flag.ExitOnError)
+	cfgPath := fs.String("config", "noisefloor.yaml", "config file")
+	addr := fs.String("addr", webhook.DefaultAddr, "address to listen on")
+	allowRemote := fs.Bool("allow-remote", false,
+		"allow binding to a non-loopback address (required if -addr is not loopback)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	if !server.IsLoopback(*addr) {
+		if !*allowRemote {
+			return fmt.Errorf(
+				"-addr %s is not loopback; pass -allow-remote to bind it (set webhook.auth "+
+					"in the config file first -- see the README before you do)",
+				*addr)
+		}
+		if !cfg.Webhook.Auth.Configured() {
+			fmt.Fprintf(os.Stderr,
+				"warning: binding to %s with NO webhook.auth configured.\n"+
+					"         Anyone who can reach this port can inject fabricated firing\n"+
+					"         history into the database noisefloor scores from. Configure\n"+
+					"         webhook.auth.bearer_token(_file) and point Alertmanager's\n"+
+					"         webhook_configs at it with a matching Authorization header,\n"+
+					"         or put a reverse proxy with real auth in front of it.\n", *addr)
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"warning: binding to %s, which is reachable beyond this machine.\n"+
+					"         webhook.auth is configured, so requests without the shared\n"+
+					"         secret are rejected -- confirm this is served over TLS (a\n"+
+					"         reverse proxy in front of it, typically) so that secret is\n"+
+					"         never sent in the clear.\n", *addr)
+		}
+	}
+
+	db, err := store.Open(cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	srv := webhook.NewServer(db, cfg.Webhook.Auth, cfg.Webhook.MaxBodyBytes)
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", *addr, err)
+	}
+	authStatus := "no authentication"
+	if cfg.Webhook.Auth.Configured() {
+		authStatus = "bearer token required"
+	}
+	fmt.Printf("noisefloor collect listening on http://%s%s (%s)\n", ln.Addr(), webhook.Path, authStatus)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	httpSrv := &http.Server{
+		Handler: srv.Handler(),
+		// Same rationale and same values as runServe's httpSrv -- see its
+		// comments. This is a write endpoint accepting unauthenticated
+		// POSTs by default, if anything more exposed to a slow or hostile
+		// client than the read-only server is.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
