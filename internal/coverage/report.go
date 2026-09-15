@@ -50,6 +50,21 @@ func Render(w io.Writer, result Result) error {
 		}
 	}
 
+	// An unattributable rule is not a coverage gap, and the difference
+	// matters more here than anywhere else in this report: every row below
+	// reads "-" for both. Saying how many rules landed on nobody lets a
+	// reader tell an inflated blind-spot list from a real one, instead of
+	// being handed the two as if they were the same finding.
+	if len(result.Unattributed) > 0 {
+		fmt.Fprintf(w, "Unattributed %d rule(s) could not be attributed to any service: they parsed and "+
+			"classified, but name no service discovered here (a rule scoped to an exporter job, or to a "+
+			"service this Prometheus does not scrape). They are NOT counted as coverage for anyone, so a "+
+			"\"-\" below may be one of these rather than a gap:\n", len(result.Unattributed))
+		for _, k := range result.Unattributed {
+			fmt.Fprintf(w, "             %s\n", k)
+		}
+	}
+
 	ambiguous := 0
 	for _, sc := range grid {
 		for _, sig := range Signals {
@@ -87,8 +102,10 @@ func Render(w io.Writer, result Result) error {
 	fmt.Fprintln(w, "\nv = covered, v? = covered but the classification is a guess, - = no alert covers this signal")
 
 	blind := RankBlindSpots(grid)
-	fmt.Fprintln(w, "\nBlind spots, ranked by traffic within each basis (req/s ranked above scrape-sample")
-	fmt.Fprintln(w, "counts -- the two are not comparable; idle services are not ranked as urgent):")
+	fmt.Fprintln(w, "\nBlind spots -- services no rule names specifically (a cluster-wide rule covering")
+	fmt.Fprintln(w, "every target counts in the grid above, but is not alerting on THIS service). Ranked")
+	fmt.Fprintln(w, "by traffic within each basis (req/s ranked above scrape-sample counts -- the two are")
+	fmt.Fprintln(w, "not comparable; idle services are not ranked as urgent):")
 	if len(blind) == 0 {
 		fmt.Fprintln(w, "  none")
 		return nil
@@ -96,9 +113,9 @@ func Render(w io.Writer, result Result) error {
 	btw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(btw, "SERVICE\tTRAFFIC\tBASIS\tSTATUS")
 	for _, b := range blind {
-		status := "no alert coverage at all"
+		status := "no rule names this service"
 		if b.Idle {
-			status = "no alert coverage -- idle, not ranked as urgent"
+			status = "no rule names this service -- idle, not ranked as urgent"
 		}
 		basis := b.Service.TrafficBasis
 		if basis == "" {

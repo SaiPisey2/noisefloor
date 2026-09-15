@@ -90,16 +90,25 @@ func Run(ctx context.Context, api prom.Client, cfg config.Config, now time.Time)
 		}
 	}
 
-	grid, parseErrors := MapRules(rules, disc.Services)
-	return Result{Grid: grid, ParseErrors: parseErrors, ExcludedJobs: disc.ExcludedJobs}, nil
+	grid, parseErrors, unattributed := MapRules(rules, disc.Services)
+	return Result{
+		Grid: grid, ParseErrors: parseErrors,
+		Unattributed: unattributed, ExcludedJobs: disc.ExcludedJobs,
+	}, nil
 }
 
 // Result is Run's output: the coverage grid, any rules that failed to
-// parse, and which configured job exclusions actually took effect (see
-// config.Coverage.ExcludeJobs) -- carried through so Render can say what
-// was left out rather than silently shrinking the report.
+// parse, any that parsed but named no discovered service, and which
+// configured job exclusions actually took effect (see
+// config.Coverage.ExcludeJobs) -- all carried through so Render can say
+// what was left out rather than silently shrinking the report.
 type Result struct {
-	Grid         []ServiceCoverage
-	ParseErrors  map[string]error
+	Grid        []ServiceCoverage
+	ParseErrors map[string]error
+	// Unattributed is every rule that parsed and classified but resolved to
+	// no discovered service, keyed "group/alertname". See MapRules: without
+	// this, such a rule and a genuine coverage gap are indistinguishable in
+	// the grid, and the blind-spot list silently inherits the difference.
+	Unattributed []string
 	ExcludedJobs []string
 }
