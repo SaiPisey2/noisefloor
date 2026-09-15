@@ -49,6 +49,39 @@ type Coverage struct {
 	// the most signal. "Nobody alerts on our own Prometheus" is still a
 	// legitimate finding some teams want; set this to [] to see it.
 	ExcludeJobs []string `yaml:"exclude_jobs"`
+
+	// RuleTargets nominates, per service (keyed by coverage.Service.Name,
+	// e.g. "search" or "shop/checkout"), the existing rule group a starter
+	// rule proposed by `noisefloor propose` should be appended to.
+	//
+	// A blind spot has, by construction, no alert on it at all -- so unlike
+	// remediate (which edits a rule Prometheus already evaluates, giving it
+	// an unambiguous home), propose has no existing rule of its own to
+	// locate. It falls back to a rule group that already covers this exact
+	// service via some OTHER signal (found automatically -- see
+	// internal/pr's target-resolution doc comment), and only asks the
+	// operator when that fails, which it always will for a service that has
+	// never had any alerting at all.
+	//
+	// Deliberately narrow: this names an EXISTING group in an EXISTING
+	// file, never a new one. Fabricating a rule file's path or a brand new
+	// group name is a guess about a team's own layout conventions
+	// (directory structure, how rule_files: globs are wired, naming
+	// scheme) that noisefloor has no way to verify, and a wrong guess is
+	// exactly the "PR that does not apply cleanly" the propose feature was
+	// warned against. Naming an existing group here costs the operator one
+	// line of config and removes the guess entirely -- remediate.LocateRules
+	// finds it by (file, group name) exactly the way it finds a rule to
+	// edit.
+	RuleTargets map[string]RuleTarget `yaml:"rule_targets"`
+}
+
+// RuleTarget is one nomination in Coverage.RuleTargets: an existing rule
+// group, identified the same way remediate.RuleLocation is (by file path
+// and group name), to append a starter rule to.
+type RuleTarget struct {
+	File  string `yaml:"file"`
+	Group string `yaml:"group"`
 }
 
 type Prometheus struct {
@@ -216,6 +249,11 @@ func (c Config) Validate() error {
 	}
 	if err := c.Alertmanager.Auth.Validate(); err != nil {
 		return fmt.Errorf("alertmanager.auth: %w", err)
+	}
+	for svc, target := range c.Coverage.RuleTargets {
+		if target.File == "" || target.Group == "" {
+			return fmt.Errorf("coverage.rule_targets[%q]: both file and group are required", svc)
+		}
 	}
 	return nil
 }

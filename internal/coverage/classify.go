@@ -120,10 +120,15 @@ func classifyMetricName(name string) (sig Signal, certain bool, reason string) {
 	return "", false, ""
 }
 
-// codeLabelNames are the label names commonly used to carry an HTTP/gRPC
+// CodeLabelNames are the label names commonly used to carry an HTTP/gRPC
 // status on a request counter. Order does not matter; the first one present
 // on the expression is used.
-var codeLabelNames = []string{"code", "status", "status_code", "grpc_code", "response_code"}
+//
+// Exported so internal/pr's coverage-blind-spot starter templates can find
+// the same status label on a service's own raw metric that this package
+// would recognise on a hand-written rule's selector -- one list, not two
+// that can quietly drift apart.
+var CodeLabelNames = []string{"code", "status", "status_code", "grpc_code", "response_code"}
 
 // classifyRequestCounterBySelector resolves the traffic-vs-errors ambiguity
 // of a generic request counter by looking at what its own status/code-like
@@ -131,7 +136,7 @@ var codeLabelNames = []string{"code", "status", "status_code", "grpc_code", "res
 // errors; all 2xx/3xx names traffic; a mix of both, or no such selector at
 // all, is left ambiguous rather than guessed.
 func classifyRequestCounterBySelector(pe ParsedExpr) (sig Signal, certain bool, reason string, ok bool) {
-	for _, label := range codeLabelNames {
+	for _, label := range CodeLabelNames {
 		values, present := pe.Matchers[label]
 		if !present {
 			continue
