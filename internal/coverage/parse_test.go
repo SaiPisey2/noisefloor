@@ -88,11 +88,14 @@ func TestExtract(t *testing.T) {
 				t.Errorf("Metrics = %v, want %v", got.Metrics, tc.wantMetrics)
 			}
 			for k, want := range tc.wantMatcher {
-				got := append([]string(nil), got.Matchers[k]...)
-				sort.Strings(got)
+				var vals []string
+				for _, m := range got.Matchers[k] {
+					vals = append(vals, m.Value)
+				}
+				sort.Strings(vals)
 				sort.Strings(want)
-				if !reflect.DeepEqual(got, want) {
-					t.Errorf("Matchers[%q] = %v, want %v", k, got, want)
+				if !reflect.DeepEqual(vals, want) {
+					t.Errorf("Matchers[%q] = %v, want %v", k, vals, want)
 				}
 			}
 			if got.HasSubquery != tc.wantSubquery {
@@ -102,6 +105,73 @@ func TestExtract(t *testing.T) {
 				t.Errorf("AbsentFuncs = %v, want %v", got.AbsentFuncs, tc.wantAbsent)
 			}
 		})
+	}
+}
+
+// TestExtractPreservesNegativeMatchers pins the parse-level half of the
+// `{code!~"2.."}` bug: negated matchers used to be dropped outright, so the
+// one label saying what such a rule is about never reached classification.
+func TestExtractPreservesNegativeMatchers(t *testing.T) {
+	pe, err := Extract(`sum(rate(http_requests_total{job="search",code!~"2.."}[5m])) > 1`)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	got := pe.Matchers["code"]
+	if len(got) != 1 {
+		t.Fatalf("Matchers[\"code\"] = %v, want exactly one matcher", got)
+	}
+	want := Matcher{Value: "2..", Negative: true, Regexp: true}
+	if got[0] != want {
+		t.Errorf("Matchers[\"code\"][0] = %+v, want %+v", got[0], want)
+	}
+	// A negated matcher mentions a label without naming a value the rule is
+	// about, so it must not be visible to callers asking what the rule names.
+	if vals, ok := pe.Positive("code"); ok {
+		t.Errorf("Positive(\"code\") = %v, true; want no positive matcher", vals)
+	}
+	if vals, ok := pe.Positive("job"); !ok || len(vals) != 1 || vals[0] != "search" {
+		t.Errorf("Positive(\"job\") = %v, %v; want [search], true", vals, ok)
+	}
+}
+
+func TestMatcherMatches(t *testing.T) {
+	cases := []struct {
+		m      Matcher
+		target string
+		want   bool
+	}{
+		{Matcher{Value: "checkout"}, "checkout", true},
+		{Matcher{Value: "checkout"}, "checkout-api", false},
+		{Matcher{Value: "prod.*", Regexp: true}, "prod-eu", true},
+		{Matcher{Value: "prod.*", Regexp: true}, "staging", false},
+		// Prometheus anchors regexp matchers at both ends; a substring
+		// match must not count.
+		{Matcher{Value: "prod", Regexp: true}, "not-prod-really", false},
+		{Matcher{Value: "checkout|billing", Regexp: true}, "billing", true},
+		{Matcher{Value: "2..", Regexp: true, Negative: true}, "500", true},
+		{Matcher{Value: "2..", Regexp: true, Negative: true}, "200", false},
+	}
+	for _, tc := range cases {
+		if got := tc.m.Matches(tc.target); got != tc.want {
+			t.Errorf("Matcher%+v.Matches(%q) = %v, want %v", tc.m, tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestExtractHasAggregation(t *testing.T) {
+	for expr, want := range map[string]bool{
+		`up == 0`:                             false,
+		`process_resident_memory_bytes > 5e8`: false,
+		`sum by (job) (rate(http_requests_total[5m])) == 0`: true,
+		`sum(rate(http_requests_total[5m])) > 100`:          true,
+	} {
+		pe, err := Extract(expr)
+		if err != nil {
+			t.Fatalf("Extract(%q): %v", expr, err)
+		}
+		if pe.HasAggregation != want {
+			t.Errorf("Extract(%q).HasAggregation = %v, want %v", expr, pe.HasAggregation, want)
+		}
 	}
 }
 
@@ -180,6 +250,44 @@ func TestClassify(t *testing.T) {
 			name:   "unrecognisable metric shape",
 			rule:   Rule{AlertName: "Weird", Expr: `some_totally_novel_metric{} > 1`},
 			wantOK: false,
+		},
+		{
+			// An ordinary error-ratio rule built on a histogram's _count
+			// series. "duration" in the name used to win outright and the
+			// status selector was never consulted, so this read as LATENCY,
+			// CERTAIN: coverage the service does not have, asserted, while
+			// the error coverage it does have was denied.
+			name: "error ratio over a duration histogram's _count series",
+			rule: Rule{AlertName: "ErrorRatio", Expr: `
+				sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+				/ sum(rate(http_request_duration_seconds_count[5m])) > 0.05`},
+			wantSignal: SignalErrors, wantCertain: false, wantOK: true,
+		},
+		{
+			// The other ordinary way to write an error rule: exclude the
+			// successes instead of enumerating the failures. Dropping !~
+			// matchers at parse time left this reading as plain traffic,
+			// CERTAIN.
+			name:       "error rule written by excluding success codes",
+			rule:       Rule{AlertName: "NotOK", Expr: `sum(rate(http_requests_total{code!~"2.."}[5m])) > 1`},
+			wantSignal: SignalErrors, wantCertain: true, wantOK: true,
+		},
+		{
+			name:       "Micrometer request timer is latency",
+			rule:       Rule{AlertName: "SpringLatency", Expr: `histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{job="orders"}[5m])) by (le)) > 2`},
+			wantSignal: SignalLatency, wantCertain: true, wantOK: true,
+		},
+		{
+			name:       "gRPC handling timer is latency",
+			rule:       Rule{AlertName: "GRPCLatency", Expr: `histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{job="ledger"}[5m])) by (le)) > 2`},
+			wantSignal: SignalLatency, wantCertain: true, wantOK: true,
+		},
+		{
+			name: "gRPC completed-RPC counter is a request counter",
+			rule: Rule{AlertName: "GRPCErrors", Expr: `
+				sum(rate(grpc_server_handled_total{job="ledger",code=~"5.."}[5m]))
+				/ sum(rate(grpc_server_handled_total{job="ledger"}[5m])) > 0.05`},
+			wantSignal: SignalErrors, wantCertain: true, wantOK: true,
 		},
 	}
 
