@@ -354,3 +354,144 @@ ON CONFLICT (rule_id, window_start, window_end) DO UPDATE SET
 	}
 	return nil
 }
+
+// GetRule fetches one rule by ID. ok is false when no such rule exists,
+// which the server's rule-detail handler turns into a 404 rather than a
+// zero-value row that would render as an empty page.
+func (s *SQLite) GetRule(ctx context.Context, id int64) (Rule, bool, error) {
+	const q = `
+SELECT id, alert_name, group_name, file, line, expr, expr_hash, for_seconds,
+       labels, annotations, first_seen, last_seen, expr_changed_at, active
+FROM rules WHERE id = ?`
+	var r Rule
+	var forSec, first, last, changed int64
+	var labels, annotations string
+	err := s.db.QueryRowContext(ctx, q, id).Scan(&r.ID, &r.AlertName, &r.GroupName,
+		&r.File, &r.Line, &r.Expr, &r.ExprHash, &forSec, &labels, &annotations,
+		&first, &last, &changed, &r.Active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Rule{}, false, nil
+	}
+	if err != nil {
+		return Rule{}, false, fmt.Errorf("get rule %d: %w", id, err)
+	}
+	r.For = time.Duration(forSec) * time.Second
+	r.Labels = fromJSONMap(labels)
+	r.Annotations = fromJSONMap(annotations)
+	r.FirstSeen = fromUnix(first)
+	r.LastSeen = fromUnix(last)
+	r.ExprChangedAt = fromUnix(changed)
+	return r, true, nil
+}
+
+// ListEpisodesForRule returns every episode ever reconstructed for one
+// rule, oldest first -- the whole history the episode timeline renders, not
+// just one scan window's worth. A rule that has fired a few thousand times
+// (see DemoFlapping in the demo fixture) still fits comfortably in memory;
+// this is a read-only reporting server, not a paging API.
+func (s *SQLite) ListEpisodesForRule(ctx context.Context, ruleID int64) ([]Episode, error) {
+	q := `SELECT ` + episodeCols + ` FROM episodes WHERE rule_id = ? ORDER BY started_at`
+	rows, err := s.db.QueryContext(ctx, q, ruleID)
+	if err != nil {
+		return nil, fmt.Errorf("list episodes for rule %d: %w", ruleID, err)
+	}
+	return s.scanEpisodes(rows)
+}
+
+func (s *SQLite) scanScores(rows *sql.Rows) ([]Score, error) {
+	defer rows.Close()
+	var out []Score
+	for rows.Next() {
+		var sc Score
+		var start, end, computed int64
+		var signals string
+		if err := rows.Scan(&sc.RuleID, &start, &end, &signals,
+			&sc.NoiseScore, &sc.Verdict, &sc.Confidence, &computed); err != nil {
+			return nil, fmt.Errorf("scan score: %w", err)
+		}
+		sc.WindowStart = fromUnix(start)
+		sc.WindowEnd = fromUnix(end)
+		sc.ComputedAt = fromUnix(computed)
+		sc.Signals = map[string]float64{}
+		_ = json.Unmarshal([]byte(signals), &sc.Signals)
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+const scoreCols = `rule_id, window_start, window_end, signals, noise_score, verdict, confidence, computed_at`
+
+// ListLatestScores returns each scored rule's most recent score -- one row
+// per rule_id, at that rule's own maximum window_end. This is what the
+// leaderboard and /api/rules render: scan can run repeatedly, and only the
+// newest verdict for a rule should ever be shown next to it.
+func (s *SQLite) ListLatestScores(ctx context.Context) ([]Score, error) {
+	q := `
+SELECT s.rule_id, s.window_start, s.window_end, s.signals, s.noise_score, s.verdict, s.confidence, s.computed_at
+FROM scores s
+INNER JOIN (SELECT rule_id, MAX(window_end) AS mw FROM scores GROUP BY rule_id) latest
+  ON latest.rule_id = s.rule_id AND latest.mw = s.window_end`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list latest scores: %w", err)
+	}
+	return s.scanScores(rows)
+}
+
+// GetLatestScore returns the most recent score for one rule. ok is false
+// when the rule has never been scored (never fired, inactive, or
+// ambiguous -- see scanner.Score, which only ever upserts a score for a
+// rule that had at least one episode and was neither).
+func (s *SQLite) GetLatestScore(ctx context.Context, ruleID int64) (Score, bool, error) {
+	q := `SELECT ` + scoreCols + ` FROM scores WHERE rule_id = ? ORDER BY window_end DESC LIMIT 1`
+	rows, err := s.db.QueryContext(ctx, q, ruleID)
+	if err != nil {
+		return Score{}, false, fmt.Errorf("get latest score for rule %d: %w", ruleID, err)
+	}
+	scores, err := s.scanScores(rows)
+	if err != nil {
+		return Score{}, false, err
+	}
+	if len(scores) == 0 {
+		return Score{}, false, nil
+	}
+	return scores[0], true, nil
+}
+
+// SetMeta and GetMeta read and write the generic key/value meta table.
+// Domain packages (internal/scanner, internal/coverage) use it to persist
+// small, singleton pieces of state -- scan statistics for /metrics, the
+// latest coverage snapshot for the coverage pages -- without this package
+// needing to know what either one means. The value is caller-defined
+// (typically a JSON blob); this layer only stores and returns bytes.
+func (s *SQLite) SetMeta(ctx context.Context, key, value string) error {
+	const q = `
+INSERT INTO meta (key, value) VALUES (?, ?)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value`
+	if _, err := s.db.ExecContext(ctx, q, key, value); err != nil {
+		return fmt.Errorf("set meta %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetMeta returns the stored value for key. ok is false when the key has
+// never been set -- e.g. no scan has run yet, or no coverage snapshot has
+// ever been saved -- which callers turn into "no data yet" rather than an
+// error.
+func (s *SQLite) GetMeta(ctx context.Context, key string) (string, bool, error) {
+	const q = `SELECT value FROM meta WHERE key = ?`
+	var value string
+	err := s.db.QueryRowContext(ctx, q, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get meta %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// Ping verifies the database connection is alive -- what /healthz checks.
+func (s *SQLite) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}

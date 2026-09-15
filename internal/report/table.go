@@ -47,6 +47,14 @@ type Meta struct {
 	// and do not appear in the table. Their absence has to be stated, or the
 	// report silently omits rules the user can see in Prometheus.
 	Ambiguous int
+
+	// QueryRetries counts retryable Prometheus query failures absorbed
+	// during this scan's backfill (collect.BackfillResult.Retries). Not
+	// printed by Render -- a scan that succeeded despite a hiccup is not
+	// something a human reads this table to learn -- but carried through
+	// so cmd/noisefloor can record it for the server's /metrics
+	// (noisefloor_query_failures_total).
+	QueryRetries int
 }
 
 func Render(w io.Writer, rows []Row, meta Meta) error {

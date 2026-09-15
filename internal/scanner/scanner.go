@@ -420,6 +420,7 @@ func RunFull(ctx context.Context, cfg config.Config, db *store.SQLite, api prom.
 			Silences:          len(silences),
 			SilencesAvailable: silencesAvailable,
 			Ambiguous:         len(ruleSync.AmbiguousNames),
+			QueryRetries:      backfill.Retries,
 		},
 	}, nil
 }

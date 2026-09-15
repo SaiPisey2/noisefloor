@@ -62,6 +62,15 @@ type BackfillResult struct {
 	// a sparse rule may simply not have fired in the first chunk -- that is not
 	// evidence of a retention edge.
 	Truncated bool
+
+	// Retries counts retryable query failures absorbed during this run (see
+	// prom.IsRetryable): every failed attempt that was not the last one for
+	// its chunk, whether or not that chunk ultimately succeeded. Exported so
+	// a caller can report it as an operational signal -- internal/scanner
+	// carries it onto ScanStats, which the server's /metrics reads as
+	// noisefloor_query_failures_total. Zero on a scan where Prometheus never
+	// hiccuped, which is the common case.
+	Retries int
 }
 
 type Backfiller struct {
@@ -152,7 +161,7 @@ func (b *Backfiller) Run(ctx context.Context, from, to time.Time) (BackfillResul
 		}
 		res.Chunks++
 
-		m, err := b.queryRangeWithRetry(ctx, `ALERTS`, start, end, step)
+		m, err := b.queryRangeWithRetry(ctx, &res, `ALERTS`, start, end, step)
 		if err != nil {
 			// Whatever earlier chunks already settled was flushed to the
 			// store as each chunk completed -- see flush below -- so this
@@ -297,7 +306,7 @@ func (b *Backfiller) flush(ctx context.Context, res *BackfillResult, accum map[s
 // a 400/422 or any other failure that will recur identically fails on the
 // first attempt, and a canceled context is never waited out, whether it is
 // canceled before the query, during it, or while this is backing off.
-func (b *Backfiller) queryRangeWithRetry(ctx context.Context, query string, start, end time.Time, step time.Duration) (model.Matrix, error) {
+func (b *Backfiller) queryRangeWithRetry(ctx context.Context, res *BackfillResult, query string, start, end time.Time, step time.Duration) (model.Matrix, error) {
 	attempts := b.cfg.Prometheus.RetryAttempts
 	if attempts < 1 {
 		attempts = 1
@@ -318,6 +327,7 @@ func (b *Backfiller) queryRangeWithRetry(ctx context.Context, query string, star
 		if attempt == attempts || !prom.IsRetryable(err) {
 			return nil, err
 		}
+		res.Retries++
 
 		delay := base << (attempt - 1) // base, 2*base, 4*base, ...
 		timer := time.NewTimer(delay)
