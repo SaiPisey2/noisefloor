@@ -99,7 +99,9 @@ func Render(w io.Writer, result Result) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "\nv = covered, v? = covered but the classification is a guess, - = no alert covers this signal")
+	fmt.Fprintln(w, "\nv = covered by a rule naming this service specifically, v? = same but the classification is a guess")
+	fmt.Fprintln(w, "g = covered only by a rule that sweeps up every service (global, not specific to this one), g? = same but a guess")
+	fmt.Fprintln(w, "- = no alert covers this signal")
 
 	blind := RankBlindSpots(grid)
 	fmt.Fprintln(w, "\nBlind spots -- services no rule names specifically (a cluster-wide rule covering")
@@ -174,15 +176,49 @@ func RenderDetail(w io.Writer, grid []ServiceCoverage) error {
 	return nil
 }
 
+// cell renders one grid cell. Global and matched coverage used to render
+// identically ("v" for either, once any certain match existed), which made
+// the RATE column read "v" for a service the blind-spot list, right below
+// it on the same screen, names as uncovered -- the same rule (a cluster-
+// wide `up == 0`) satisfying two different questions (AnyCoverage vs
+// AnyScopedCoverage) with one indistinguishable glyph, reading as the tool
+// contradicting itself. `g`/`g?` make the less specific case visibly
+// different from `v`/`v?`, so a reader sees at a glance which cells are
+// backed by a rule that actually names this service and which are only
+// swept up by a cluster-wide one.
+//
+// Priority when a signal carries several matches of different kinds:
+// matched-certain (the strongest claim) beats global-certain, which beats
+// matched-guess, which beats global-guess -- certainty and specificity both
+// matter, and a single cell can only show one glyph.
 func cell(sc ServiceCoverage, sig Signal) string {
 	matches := sc.Covered[sig]
 	if len(matches) == 0 {
 		return "-"
 	}
+	var matchedCertain, globalCertain, matchedGuess, globalGuess bool
 	for _, m := range matches {
-		if m.Certain {
-			return "v"
+		switch {
+		case m.Scope == "matched" && m.Certain:
+			matchedCertain = true
+		case m.Scope == "global" && m.Certain:
+			globalCertain = true
+		case m.Scope == "matched":
+			matchedGuess = true
+		default:
+			globalGuess = true
 		}
 	}
-	return "v?"
+	switch {
+	case matchedCertain:
+		return "v"
+	case globalCertain:
+		return "g"
+	case matchedGuess:
+		return "v?"
+	case globalGuess:
+		return "g?"
+	default:
+		return "-" // unreachable: every match falls into one of the cases above
+	}
 }
