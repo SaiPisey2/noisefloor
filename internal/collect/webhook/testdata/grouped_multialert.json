@@ -1,0 +1,31 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"DemoCauseA\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "team-pager",
+  "groupLabels": {"alertname": "DemoCauseA"},
+  "commonLabels": {"alertname": "DemoCauseA", "severity": "page"},
+  "commonAnnotations": {"summary": "cause A firing"},
+  "externalURL": "http://alertmanager.demo:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "DemoCauseA", "instance": "host-1", "severity": "page"},
+      "annotations": {"summary": "cause A firing on host-1", "runbook": "https://runbooks.example/demo-cause-a"},
+      "startsAt": "2026-09-15T09:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.demo:9090/graph?g0.expr=cause_a",
+      "fingerprint": "aaaa1111"
+    },
+    {
+      "status": "firing",
+      "labels": {"alertname": "DemoCauseA", "instance": "host-2", "severity": "page"},
+      "annotations": {"summary": "cause A firing on host-2", "runbook": "https://runbooks.example/demo-cause-a"},
+      "startsAt": "2026-09-15T09:00:05Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.demo:9090/graph?g0.expr=cause_a",
+      "fingerprint": "aaaa2222"
+    }
+  ]
+}

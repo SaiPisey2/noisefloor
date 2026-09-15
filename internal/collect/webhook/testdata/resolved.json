@@ -1,0 +1,22 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"DemoSpiky\"}",
+  "truncatedAlerts": 0,
+  "status": "resolved",
+  "receiver": "team-pager",
+  "groupLabels": {"alertname": "DemoSpiky"},
+  "commonLabels": {"alertname": "DemoSpiky", "severity": "page"},
+  "commonAnnotations": {"summary": "spiky resolved"},
+  "externalURL": "http://alertmanager.demo:9093",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {"alertname": "DemoSpiky", "instance": "host-1", "severity": "page"},
+      "annotations": {"summary": "spiky resolved on host-1"},
+      "startsAt": "2026-09-15T09:10:00Z",
+      "endsAt": "2026-09-15T09:10:35Z",
+      "generatorURL": "http://prometheus.demo:9090/graph?g0.expr=spiky",
+      "fingerprint": "bbbb1111"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "version": "4",
+  "groupKey": "{}:{}",
+  "status": "firing",
+  "receiver": "team-pager",
+  "groupLabels": {},
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"instance": "host-1", "severity": "page"},
+      "annotations": {"summary": "no alertname label"},
+      "startsAt": "2026-09-15T09:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.demo:9090/graph",
+      "fingerprint": "cccc1111"
+    }
+  ]
+}
