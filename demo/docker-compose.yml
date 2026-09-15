@@ -32,6 +32,12 @@ services:
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     ports: ["9093:9093"]
+    # Lets alertmanager.yml's commented-out webhook_configs example reach a
+    # `noisefloor collect` started on the host, via host.docker.internal --
+    # see the README's Demo section. host-gateway needs Docker 20.10+;
+    # harmless when the commented-out entry stays commented out.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   promdata:

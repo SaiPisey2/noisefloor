@@ -6,3 +6,18 @@ route:
 
 receivers:
   - name: blackhole
+    # To see `noisefloor collect` receive real, live notifications from this
+    # demo stack (see the README's Demo section), start a collector on the
+    # host --
+    #
+    #   noisefloor collect -config noisefloor.yaml -addr 0.0.0.0:9094 -allow-remote
+    #
+    # -- uncomment this, and `docker compose restart alertmanager`.
+    # host.docker.internal resolves to the host from inside this container
+    # via the docker-compose.yml `extra_hosts` entry below.
+    #
+    # webhook_configs:
+    #   - url: http://host.docker.internal:9094/webhook
+    #     http_config:
+    #       authorization:
+    #         credentials: replace-with-the-same-token-as-webhook.auth.bearer_token

@@ -221,6 +221,29 @@ make build && ./noisefloor scan
 Brings up Prometheus, Alertmanager and a service that emits deliberately noisy
 and deliberately healthy alerts, then seeds 30 days of history.
 
+The demo's Prometheus continuously evaluates the seeded rules against
+`faultgen`'s live metrics, so its Alertmanager genuinely fires and resolves
+alerts in real time (not just against the seeded history) -- and its
+`alertmanager.yml` ships a commented-out `webhook_configs` entry showing how
+to point that live traffic at a `noisefloor collect` you start yourself:
+
+```
+noisefloor collect -config noisefloor.yaml -addr 0.0.0.0:9094 -allow-remote
+```
+
+(`-allow-remote` because Alertmanager reaches it from inside the compose
+network, not from `localhost`; use `docker compose restart alertmanager`
+after uncommenting the webhook_configs entry.) This is left commented out,
+and out of the automated integration suite, deliberately: whether and when
+the demo rules actually fire depends on `faultgen`'s live signal and
+Alertmanager's `group_wait`/`group_interval`, which would make an automated
+test that waits on it flaky in exactly the way the deterministic,
+fixture-driven tests in `internal/collect/webhook` are not. The reconciliation
+rule, payload handling and auth are already exercised end-to-end against real
+Alertmanager webhook payloads (see `internal/collect/webhook/testdata`); this
+manual step is for seeing it happen against a live Alertmanager, not for
+proving correctness.
+
 ## Remediation
 
 Scoring a rule is not fixing it. `noisefloor remediate` closes that gap: it
@@ -544,6 +567,120 @@ content -- alert names, labels, annotations, PromQL expressions -- by
 default) plus a few dozen lines of vanilla JS for a client-side table
 filter. The core content of every page renders and reads correctly with
 JavaScript disabled.
+
+## Collect (Alertmanager webhook)
+
+**The backfill above remains sufficient on its own. This is optional.**
+`noisefloor scan` reconstructs history from `ALERTS` with zero configuration
+change to Alertmanager; nothing in this section is required to get a useful
+leaderboard. `noisefloor collect` is a forward-looking, strictly additive
+write path for teams who want two things the `ALERTS` series cannot carry
+at all:
+
+- **Fields**: the receiver an alert routed to, the grouping Alertmanager
+  applied, annotations as rendered at fire time (after Alertmanager's own
+  templating), and `generatorURL`.
+- **Sub-step fidelity**: an alert that fires and resolves inside one
+  `prometheus.step` is invisible to the backfill and fully visible here.
+
+These are genuinely different measurements of the same rule, not a more
+accurate version of the backfill's -- see Reconciliation below for how the
+two are combined without double-counting.
+
+Point Alertmanager's `webhook_configs` at it:
+
+```yaml
+# alertmanager.yml
+receivers:
+  - name: noisefloor
+    webhook_configs:
+      - url: http://127.0.0.1:9094/webhook
+        http_config:
+          authorization:
+            credentials_file: /etc/alertmanager/noisefloor-webhook-token
+```
+
+```yaml
+# noisefloor.yaml
+webhook:
+  auth:
+    bearer_token_file: /etc/alertmanager/noisefloor-webhook-token
+```
+
+```
+noisefloor collect -config noisefloor.yaml
+noisefloor collect listening on http://127.0.0.1:9094/webhook (bearer token required)
+```
+
+**A separate command from `serve`, on purpose.** `serve` is documented and
+tested as strictly read-only; `collect` writes an episode to the database on
+every request it accepts, so it needed its own command rather than a route
+bolted onto `serve`.
+
+**Binds to loopback by default**, exactly like `serve`: reaching a wider
+address needs an explicit `-allow-remote`, which prints a warning every
+time, not just the first --
+
+```
+noisefloor collect -addr 0.0.0.0:9094 -allow-remote
+```
+
+-- and, unlike `serve`, this one CAN be authenticated: set
+`webhook.auth.bearer_token` or `webhook.auth.bearer_token_file` (re-read per
+request, so a rotated secret needs no restart) and Alertmanager will send it
+as a bearer token via `http_config.authorization` on the `webhook_configs`
+entry, as in the snippet above. A request without a matching token gets
+`401`. Running without `webhook.auth` configured is only safe bound to
+loopback; `-allow-remote` warns loudly if you do it anyway.
+
+**The request body is bounded** (`webhook.max_body_bytes`, default 1 MiB)
+via `http.MaxBytesReader` before the JSON decoder ever sees it -- an
+unbounded decode on a public endpoint is a memory-exhaustion primitive.
+**The payload is validated, not trusted**: alert names, labels and
+annotations arriving here are attacker-controlled if this endpoint is
+reachable at all, and they flow into the same store the UI renders from (the
+UI escapes on output, which is the right place for that -- but a malformed
+or hostile payload must never be able to corrupt the database or crash the
+collector). A payload missing required fields, carrying an unknown status,
+or grossly exceeding realistic size bounds is rejected with `400` and
+written nowhere.
+
+### Reconciliation
+
+A single firing observed by both the backfill and the webhook must become
+one episode, never two -- the store already refuses to store two overlapping
+episodes for the same rule, labelset and state (see Limits below), but its
+generic rule discards the second observation outright, which would silently
+throw away the webhook's richer data whenever a backfilled episode already
+covers the same window. `collect` therefore reconciles explicitly:
+
+1. **Exact match** on `(rule, labelset, state, started_at)` -- a repeat
+   notification for a firing already recorded by either path, or a resolved
+   notification closing one the webhook itself opened. `ended_at` is
+   extended, never shrunk.
+2. **Overlapping or adjacent**, from either source -- the same firing,
+   observed at different precision. Adjacency is judged against the
+   *wider* of the two episodes' `resolution` values, because resolution is
+   exactly the store's own documented measure of how far off a backfilled
+   boundary can be (an episode's `ended_at` overestimates by at most one
+   query step). The existing row's boundaries are left untouched -- rewriting
+   a backfilled episode's `started_at` would collide with the very
+   uniqueness constraint that makes overlap detection possible, and the
+   store's established rule elsewhere is "what is already stored wins" (see
+   Limits). Only the webhook-only metadata is attached.
+3. **Neither of the above**: a firing neither path has recorded yet, most
+   often one entirely invisible to the backfill. A new episode is inserted
+   with `source: webhook`.
+
+### Where the webhook-only fields live
+
+Receiver, grouping, fire-time annotations, `generatorURL`, and the webhook's
+own exact boundaries live in a separate table (`episode_webhook_meta`),
+one-to-one with an episode, rather than as columns on `episodes` itself.
+Doing it this way needed no change to `episodes`, its `UNIQUE` constraint,
+or the backfill's write path that both depend on -- and no migration beyond
+the same `CREATE TABLE IF NOT EXISTS` every table in this schema already
+uses; there is no other migration mechanism in this project to maintain.
 
 ## Limits
 
