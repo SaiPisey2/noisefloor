@@ -9,6 +9,8 @@ import (
 	"github.com/SaiPisey2/noisefloor/internal/remediate"
 	"github.com/SaiPisey2/noisefloor/internal/scanner"
 	"github.com/SaiPisey2/noisefloor/internal/score"
+
+	"github.com/SaiPisey2/noisefloor/internal/safe"
 )
 
 // Kind is which shape of remediation a Proposal is.
@@ -94,9 +96,9 @@ type Refusal struct {
 
 func (r Refusal) String() string {
 	if r.Detail != "" {
-		return fmt.Sprintf("%s/%s: refused -- %s (%s)", r.Group, r.AlertName, r.Reason, r.Detail)
+		return fmt.Sprintf("%s/%s: refused -- %s (%s)", safe.Text(r.Group), safe.Text(r.AlertName), r.Reason, safe.Text(r.Detail))
 	}
-	return fmt.Sprintf("%s/%s: refused -- %s", r.Group, r.AlertName, r.Reason)
+	return fmt.Sprintf("%s/%s: refused -- %s", safe.Text(r.Group), safe.Text(r.AlertName), r.Reason)
 }
 
 // Build turns one scored rule into either a Proposal or a Refusal.

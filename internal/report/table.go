@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/noisefloor/internal/score"
+
+	"github.com/SaiPisey2/noisefloor/internal/safe"
 )
 
 type Row struct {
@@ -130,7 +132,10 @@ func Render(w io.Writer, rows []Row, meta Meta) error {
 
 	for _, r := range sorted {
 		fmt.Fprintf(tw, "%.0f\t%.1f\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.Noise, r.Confidence, evidence(r.Signals), r.Verdict, r.GroupName, r.AlertName,
+			// GroupName and AlertName come from the remote Prometheus. An
+			// ANSI escape in one can clear or forge a terminal line, and a
+			// newline can forge a whole row of this table.
+			r.Noise, r.Confidence, evidence(r.Signals), r.Verdict, safe.Text(r.GroupName), safe.Text(r.AlertName),
 			r.Signals.Fires,
 			formatDuration(r.Signals.P50Duration),
 			pct(r.Signals.ShortLivedRate),

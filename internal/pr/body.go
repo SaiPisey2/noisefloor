@@ -115,11 +115,17 @@ func (e Evidence) windowDays() float64 {
 func RetireBody(e Evidence) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## noisefloor: retire `%s`\n\n", e.AlertName)
+	// The rule's own name and group are remote-sourced: whoever writes the
+	// alerting rules chooses them, and this body is read by whoever reviews
+	// the pull request. They are escaped with mdText and NOT wrapped in
+	// backticks -- a code span can be closed by a backtick in the value,
+	// and a backslash escape does not work inside one, so plain escaped
+	// text is the shape that cannot be broken out of.
+	fmt.Fprintf(&b, "## noisefloor: retire %s\n\n", mdText(e.AlertName))
 	fmt.Fprintf(&b,
-		"Proposed for deletion: `%s` / `%s`. This rule crosses noisefloor's retire "+
+		"Proposed for deletion: %s / %s. This rule crosses noisefloor's retire "+
 			"threshold on the evidence below, gathered over the observation window "+
-			"stated here -- not asserted, checkable.\n\n", e.Group, e.AlertName)
+			"stated here -- not asserted, checkable.\n\n", mdText(e.Group), mdText(e.AlertName))
 
 	fmt.Fprintf(&b, "%s\n\n", evidenceStatement(e.PagerOutcomes))
 
@@ -183,9 +189,10 @@ func RetireBody(e Evidence) string {
 func TuneBody(e Evidence, currentFor, candidateFor time.Duration, sentence string) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## noisefloor: tune `%s`\n\n", e.AlertName)
-	fmt.Fprintf(&b, "Proposed change: `%s` / `%s`. Raise `for: %s` to `for: %s`.\n\n",
-		e.Group, e.AlertName, formatDuration(currentFor), formatDuration(candidateFor))
+	// See RetireBody: remote-sourced, escaped, and not in a code span.
+	fmt.Fprintf(&b, "## noisefloor: tune %s\n\n", mdText(e.AlertName))
+	fmt.Fprintf(&b, "Proposed change: %s / %s. Raise `for: %s` to `for: %s`.\n\n",
+		mdText(e.Group), mdText(e.AlertName), formatDuration(currentFor), formatDuration(candidateFor))
 	fmt.Fprintf(&b, "%s\n\n", sentence)
 	fmt.Fprintf(&b, "%s\n\n", evidenceStatement(e.PagerOutcomes))
 
@@ -229,13 +236,17 @@ func silencedBySection(sils []store.Silence, available bool) string {
 	}
 	var b strings.Builder
 	b.WriteString("**Silenced by:**\n\n")
+	// A silence's author and comment are the least trusted strings in this
+	// whole body: the comment is free text, written by whoever created the
+	// silence through Alertmanager, and it lands in a list item in someone
+	// else's repository.
 	for _, s := range sils {
 		comment := s.Comment
 		if comment == "" {
 			comment = "(no comment)"
 		}
 		fmt.Fprintf(&b, "- %s, %s to %s: %s\n",
-			s.CreatedBy, s.StartsAt.Format(time.RFC3339), s.EndsAt.Format(time.RFC3339), comment)
+			mdText(s.CreatedBy), s.StartsAt.Format(time.RFC3339), s.EndsAt.Format(time.RFC3339), mdText(comment))
 	}
 	return b.String()
 }

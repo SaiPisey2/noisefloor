@@ -3,6 +3,8 @@ package pr
 import (
 	"fmt"
 	"io"
+
+	"github.com/SaiPisey2/noisefloor/internal/safe"
 )
 
 // WriteResult prints res to w in the form a human reviews: one block per
@@ -30,7 +32,9 @@ func WriteResult(w io.Writer, res RunResult, apply bool) {
 			fmt.Fprintln(w)
 		}
 		fmt.Fprintf(w, "================================================================\n")
-		fmt.Fprintf(w, "%s: %s/%s\n", p.Kind, p.Group, p.AlertName)
+		// Remote-sourced: see report.Table. The body below is already
+		// escaped by mdText; this header is not, so sanitize it here.
+		fmt.Fprintf(w, "%s: %s/%s\n", p.Kind, safe.Text(p.Group), safe.Text(p.AlertName))
 		fmt.Fprintf(w, "branch: %s\n", p.Branch)
 		fmt.Fprintf(w, "file:   %s\n", p.File)
 		fmt.Fprintf(w, "----------------------------------------------------------------\n")
