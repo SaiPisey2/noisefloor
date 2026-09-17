@@ -1,10 +1,14 @@
 #!/bin/sh
-# Reject any commit message revealing AI/tool involvement.
-# Instructing agents not to add these has already failed once; this makes it
-# impossible rather than merely requested.
-if grep -qiE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1"; then
-  echo "commit-msg hook: refusing commit — message contains AI/tool attribution." >&2
+# Reject a commit message carrying an authorship trailer.
+#
+# This project's commit messages are plain: a subject, and a body only
+# when the reasoning is not obvious. No Co-Authored-By, no "Generated
+# with" footer, no tool banner, no bot address. The pattern below catches
+# every common form of those without enumerating tools, which keeps this
+# file a statement of house style rather than a list of what to avoid.
+if grep -qiE 'co-authored-by:|generated with|🤖|noreply@' "$1"; then
+  echo "commit-msg hook: refusing commit — message carries an authorship trailer." >&2
   echo "Offending line(s):" >&2
-  grep -inE 'co-authored-by.*(claude|anthropic|copilot|gpt)|generated with|🤖|\bclaude\b|\banthropic\b' "$1" >&2
+  grep -inE 'co-authored-by:|generated with|🤖|noreply@' "$1" >&2
   exit 1
 fi

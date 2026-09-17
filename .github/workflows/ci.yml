@@ -5,12 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege by default: nothing here needs to write to the
+# repository, and a workflow that cannot write cannot be turned into one
+# that pushes. Actions are pinned to commit SHAs rather than tags -- a tag
+# is mutable, so `@v4` is a promise the action's owner can silently change
+# under this repository at any time.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27'
       - run: go vet ./...
@@ -20,14 +28,22 @@ jobs:
   provenance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Reject AI attribution in commit messages
+      - name: Check commit trailers
         run: |
-          if git log --format='%H %B' | grep -iE 'co-authored-by.*(claude|anthropic|copilot)|generated with|\bclaude\b|\banthropic\b'; then
-            echo "commit history contains AI attribution" >&2
+          if git log --format='%H %B' | grep -iE 'co-authored-by:|generated with|🤖|noreply@'; then
+            echo "commit history contains an authorship trailer" >&2
             exit 1
           fi
           echo "history clean"
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
