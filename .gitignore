@@ -1,8 +1,5 @@
 # local docs and planning
 docs/
-CLAUDE.md
-AGENTS.md
-.claude/
 
 # build output
 /noisefloor
