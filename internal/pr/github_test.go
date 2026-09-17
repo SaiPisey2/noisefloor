@@ -1,12 +1,14 @@
 package pr
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -293,5 +295,204 @@ func TestFindPRReportsAMergedPRAsMerged(t *testing.T) {
 	}
 	if pr.State != "merged" {
 		t.Errorf("state = %q, want merged", pr.State)
+	}
+}
+
+// --- status codes, not message text ---------------------------------------
+//
+// Every "was this a 404?" decision here used to be a substring search over
+// the formatted error, which embeds the request path and the response
+// body. See apiError.
+
+func alwaysStatus(t *testing.T, status int, body string) *GitHubProvider {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return &GitHubProvider{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+}
+
+func TestGetContentTreatsOnlyARealNotFoundAsMissing(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		owner     string
+		repo      string
+		wantErr   bool
+		wantFound bool
+	}{
+		{
+			name:   "a 502 quoting an upstream 404 is an error, not a missing file",
+			status: http.StatusBadGateway,
+			body:   `{"message":"upstream returned 404 to the cache"}`,
+			owner:  "acme", repo: "rules",
+			wantErr: true,
+		},
+		{
+			// github.com/acme/status-404-page is an ordinary repository
+			// name. The request path is echoed into the error message, so
+			// this used to make EVERY failure on that repo read as a 404.
+			name:   "a 500 on a repo whose name contains 404 is still an error",
+			status: http.StatusInternalServerError,
+			body:   `{"message":"internal error"}`,
+			owner:  "acme", repo: "status-404-page",
+			wantErr: true,
+		},
+		{
+			name:   "a 403 rate limit is an error, not a missing file",
+			status: http.StatusForbidden,
+			body:   `{"message":"API rate limit exceeded"}`,
+			owner:  "acme", repo: "rules",
+			wantErr: true,
+		},
+		{
+			name:   "a real 404 is a missing file",
+			status: http.StatusNotFound,
+			body:   `{"message":"Not Found"}`,
+			owner:  "acme", repo: "rules",
+			wantErr: false, wantFound: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := alwaysStatus(t, tc.status, tc.body)
+			_, found, err := g.getContent(context.Background(), tc.owner, tc.repo, "rules/demo.yml", "main")
+			if tc.wantErr && err == nil {
+				t.Fatalf("http %d: got found=%v err=nil, want an error -- a non-404 was read as a missing file, "+
+					"which is the one answer that makes CommitFiles skip its base-moved-on check", tc.status, found)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("http %d: unexpected error: %v", tc.status, err)
+			}
+			if !tc.wantErr && found != tc.wantFound {
+				t.Fatalf("http %d: found = %v, want %v", tc.status, found, tc.wantFound)
+			}
+		})
+	}
+}
+
+func TestEnsureBranchOnlyCreatesOnARealNotFound(t *testing.T) {
+	g := alwaysStatus(t, http.StatusBadGateway, `{"message":"proxy saw 404 downstream"}`)
+	err := g.EnsureBranch(context.Background(), "acme", "rules", "noisefloor/retire-x", "main")
+	if err == nil {
+		t.Fatal("EnsureBranch returned nil on a 502; a transient failure was read as 'branch does not exist'")
+	}
+	if !strings.Contains(err.Error(), "check branch") {
+		t.Fatalf("error = %v, want it to report the branch check failing", err)
+	}
+}
+
+// --- URL construction ------------------------------------------------------
+
+func TestGetContentSendsTheRefItWasAskedFor(t *testing.T) {
+	var gotRawPath, gotRef string
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// RequestURI is the path exactly as it went over the wire, before
+		// net/http decodes percent-escapes back into r.URL.Path.
+		gotRawPath, _, _ = strings.Cut(r.RequestURI, "?")
+		gotQuery = r.URL.Query()
+		gotRef = gotQuery.Get("ref")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	g := &GitHubProvider{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+
+	// A "?" in the rule-file path used to start the query string early, so
+	// the ref the caller asked for was replaced by one the path carried --
+	// and that blob is exactly what CommitFiles compares against
+	// BaseContent before deciding the write is safe.
+	if _, _, err := g.getContent(context.Background(), "acme", "rules", "rules/a?ref=attacker&x.yml", "main"); err != nil {
+		t.Fatalf("getContent: %v", err)
+	}
+	if gotRef != "main" {
+		t.Fatalf("server saw ref=%q, want %q -- the file path hijacked the ref", gotRef, "main")
+	}
+	if len(gotQuery) != 1 {
+		t.Fatalf("server saw query %v, want only ref -- the file path injected parameters", gotQuery)
+	}
+	// Only "?" has to be escaped: query parsing starts at the first
+	// unescaped one, so once it is %3F everything after it stays in the
+	// path, where "&" is an ordinary character.
+	if strings.Contains(gotRawPath, "?") {
+		t.Fatalf("server saw raw path %q, want the '?' percent-escaped inside the path segment", gotRawPath)
+	}
+}
+
+func TestRepoAndPathTraversalIsRefused(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.RequestURI
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	g := &GitHubProvider{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+
+	cases := []struct{ name, owner, repo, path string }{
+		{"repo traverses out of /repos", "acme", "..", "rules/demo.yml"},
+		{"file path traverses out of the repo", "acme", "rules", "../../../etc/passwd"},
+		{"absolute file path", "acme", "rules", "/etc/passwd"},
+		{"empty owner", "", "rules", "rules/demo.yml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPath = ""
+			if _, _, err := g.getContent(context.Background(), tc.owner, tc.repo, tc.path, "main"); err == nil {
+				t.Fatalf("getContent accepted it and requested %q; want a refusal", gotPath)
+			}
+			if gotPath != "" {
+				t.Fatalf("a request was sent (%q) before the refusal", gotPath)
+			}
+		})
+	}
+}
+
+func TestDoRedactsTokenFromErrorBody(t *testing.T) {
+	const token = "ghp_notarealtokenbutlongenough"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A proxy reflecting the Authorization header back into the body.
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `{"message":"rejected request with Authorization: Bearer %s"}`, token)
+	}))
+	defer srv.Close()
+	g := &GitHubProvider{BaseURL: srv.URL, Token: token, Client: srv.Client()}
+
+	_, err := g.do(context.Background(), http.MethodGet, "/repos/acme/rules/pulls", nil, nil)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("the token is in the error text, which goes to stderr and CI logs: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("error = %v, want the token replaced with [REDACTED]", err)
+	}
+}
+
+func TestDoRejectsAnOversizedBodyRatherThanTruncating(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"a":"`))
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for written := 0; written < maxResponseBytes+(1<<20); written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+		w.Write([]byte(`"}`))
+	}))
+	defer srv.Close()
+	g := &GitHubProvider{BaseURL: srv.URL, Token: "t", Client: srv.Client()}
+
+	var out map[string]string
+	_, err := g.do(context.Background(), http.MethodGet, "/repos/acme/rules/pulls", nil, &out)
+	if err == nil {
+		t.Fatal("an oversized body was accepted; want a clear error rather than a truncated decode")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want it to name the size limit", err)
 	}
 }
